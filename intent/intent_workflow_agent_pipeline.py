@@ -58,6 +58,12 @@ class Pipeline:
             description="后端服务基础URL"
         )
 
+        # 知识库API配置
+        KNOWLEDGE_API_URL: str = Field(
+            default="http://117.50.252.245:3000",
+            description="知识库API基础URL"
+        )
+
         # 默认执行模式
         DEFAULT_MODE: str = Field(
             default=WORKFLOW_MODE,
@@ -435,6 +441,9 @@ class Pipeline:
             if conversation_id:
                 request_data["conversation_id"] = conversation_id
 
+            # 添加知识库API URL
+            request_data["knowledge_api_url"] = self.valves.KNOWLEDGE_API_URL
+
             # 构建请求头
             headers = {'Content-Type': 'application/json'}
             if user_token:
@@ -508,6 +517,9 @@ class Pipeline:
             
             # 添加知识库配置
             request_data["knowledge_bases"] = self._parsed_knowledge_bases
+            
+            # 添加知识库API URL
+            request_data["knowledge_api_url"] = self.valves.KNOWLEDGE_API_URL
             
             # 添加metadata以改善处理
             request_data["metadata"] = {
@@ -814,6 +826,9 @@ if __name__ == "__main__":
     # 可选：自定义知识库配置
     # pipeline.valves.KNOWLEDGE_BASES = '[{"name": "ai_history", "description": "人工智能历史知识库"}, {"name": "tech_docs", "description": "技术文档知识库"}]'
     # pipeline._validate_knowledge_bases()  # 重新验证配置
+
+    # 可选：自定义知识库API URL
+    # pipeline.valves.KNOWLEDGE_API_URL = "http://your-custom-knowledge-api:3000"
 
     # 示例消息
     test_messages = [
