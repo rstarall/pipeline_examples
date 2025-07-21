@@ -480,7 +480,7 @@ class Pipeline:
         context_messages = []
 
         if messages and len(messages) > 1:
-            recent_messages = messages[-8:]
+            recent_messages = messages[-6:]  # 默认3轮对话（6条消息）
             context_text = ""
             conversation_topics = []
 
@@ -589,7 +589,7 @@ class Pipeline:
         conversation_summary = ""
 
         if messages and len(messages) > 1:
-            recent_messages = messages[-8:]
+            recent_messages = messages[-6:]  # 默认3轮对话（6条消息）
 
             for msg in recent_messages:
                 role = msg.get("role", "")

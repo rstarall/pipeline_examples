@@ -1,30 +1,32 @@
 """
-title: Search LightRAG Pipeline
+title: SearxNG LightRAG Pipeline
 author: open-webui
 date: 2024-12-20
 version: 1.0
 license: MIT
-description: A 4-stage pipeline: 1) Query optimization, 2) Web search using Bocha API, 3) Generate enhanced LightRAG query, 4) LightRAG Q&A
+description: A 4-stage pipeline: 1) Query optimization, 2) Web search using SearxNG API, 3) Generate enhanced LightRAG query, 4) LightRAG Q&A
 requirements: requests, pydantic
 """
 
 import os
 import json
 import requests
+import time
 from typing import List, Union, Generator, Iterator
 from pydantic import BaseModel
 
 
 class Pipeline:
     class Valves(BaseModel):
-        # 博查搜索API配置
-        BOCHA_API_KEY: str
-        BOCHA_BASE_URL: str
-        BOCHA_SEARCH_COUNT: int
-        BOCHA_FRESHNESS: str
-        BOCHA_ENABLE_SUMMARY: bool
-        BOCHA_TIMEOUT: int
-        
+        # SearxNG搜索API配置
+        SEARXNG_URL: str
+        SEARXNG_SEARCH_COUNT: int
+        SEARXNG_LANGUAGE: str
+        SEARXNG_TIMEOUT: int
+        SEARXNG_CATEGORIES: str
+        SEARXNG_TIME_RANGE: str
+        SEARXNG_SAFESEARCH: int
+
         # OpenAI配置（用于问题优化和LightRAG查询生成）
         OPENAI_API_KEY: str
         OPENAI_BASE_URL: str
@@ -32,50 +34,51 @@ class Pipeline:
         OPENAI_TIMEOUT: int
         OPENAI_MAX_TOKENS: int
         OPENAI_TEMPERATURE: float
-        
+
         # LightRAG配置
         LIGHTRAG_BASE_URL: str
         LIGHTRAG_DEFAULT_MODE: str
         LIGHTRAG_TIMEOUT: int
         LIGHTRAG_ENABLE_STREAMING: bool
-        
+
         # Pipeline配置
         ENABLE_STREAMING: bool
         DEBUG_MODE: bool
 
     def __init__(self):
-        self.name = "Search LightRAG Pipeline"
+        self.name = "SearxNG LightRAG Pipeline"
         # 初始化token统计
         self.token_stats = {
             "input_tokens": 0,
             "output_tokens": 0,
             "total_tokens": 0
         }
-        
+
         self.valves = self.Valves(
             **{
-                # 博查搜索配置
-                "BOCHA_API_KEY": os.getenv("BOCHA_API_KEY", ""),
-                "BOCHA_BASE_URL": os.getenv("BOCHA_BASE_URL", "https://api.bochaai.com/v1"),
-                "BOCHA_SEARCH_COUNT": int(os.getenv("BOCHA_SEARCH_COUNT", "8")),
-                "BOCHA_FRESHNESS": os.getenv("BOCHA_FRESHNESS", "oneYear"),
-                "BOCHA_ENABLE_SUMMARY": os.getenv("BOCHA_ENABLE_SUMMARY", "true").lower() == "true",
-                "BOCHA_TIMEOUT": int(os.getenv("BOCHA_TIMEOUT", "30")),
-                
+                # SearxNG搜索配置
+                "SEARXNG_URL": os.getenv("SEARXNG_URL", "http://117.50.252.245:8081"),
+                "SEARXNG_SEARCH_COUNT": int(os.getenv("SEARXNG_SEARCH_COUNT", "8")),
+                "SEARXNG_LANGUAGE": os.getenv("SEARXNG_LANGUAGE", "zh-CN"),
+                "SEARXNG_TIMEOUT": int(os.getenv("SEARXNG_TIMEOUT", "15")),
+                "SEARXNG_CATEGORIES": os.getenv("SEARXNG_CATEGORIES", "general"),
+                "SEARXNG_TIME_RANGE": os.getenv("SEARXNG_TIME_RANGE", "month"),  # day, week, month, year
+                "SEARXNG_SAFESEARCH": int(os.getenv("SEARXNG_SAFESEARCH", "0")),  # 0, 1, 2
+
                 # OpenAI配置
                 "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY", ""),
-                "OPENAI_BASE_URL": os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+                "OPENAI_BASE_URL": os.getenv("OPENAI_BASE_URL", "https://openrouter.ai/api/v1"),
                 "OPENAI_MODEL": os.getenv("OPENAI_MODEL", "gpt-4o"),
                 "OPENAI_TIMEOUT": int(os.getenv("OPENAI_TIMEOUT", "60")),
                 "OPENAI_MAX_TOKENS": int(os.getenv("OPENAI_MAX_TOKENS", "4000")),
                 "OPENAI_TEMPERATURE": float(os.getenv("OPENAI_TEMPERATURE", "0.7")),
-                
+
                 # LightRAG配置
                 "LIGHTRAG_BASE_URL": os.getenv("LIGHTRAG_BASE_URL", "http://localhost:9621"),
                 "LIGHTRAG_DEFAULT_MODE": os.getenv("LIGHTRAG_DEFAULT_MODE", "hybrid"),
                 "LIGHTRAG_TIMEOUT": int(os.getenv("LIGHTRAG_TIMEOUT", "30")),
                 "LIGHTRAG_ENABLE_STREAMING": os.getenv("LIGHTRAG_ENABLE_STREAMING", "true").lower() == "true",
-                
+
                 # Pipeline配置
                 "ENABLE_STREAMING": os.getenv("ENABLE_STREAMING", "true").lower() == "true",
                 "DEBUG_MODE": os.getenv("DEBUG_MODE", "false").lower() == "true",
@@ -83,28 +86,23 @@ class Pipeline:
         )
 
     async def on_startup(self):
-        print(f"Search LightRAG Pipeline启动: {__name__}")
-        
+        print(f"SearxNG LightRAG Pipeline启动: {__name__}")
+
         # 验证必需的API密钥
-        if not self.valves.BOCHA_API_KEY:
-            print("❌ 缺少博查API密钥，请设置BOCHA_API_KEY环境变量")
         if not self.valves.OPENAI_API_KEY:
             print("❌ 缺少OpenAI API密钥，请设置OPENAI_API_KEY环境变量")
-            
-        # 测试博查API连接
-        if self.valves.BOCHA_API_KEY:
-            try:
-                print("🔧 开始测试博查API连接...")
-                test_response = self._search_bocha("test query", count=1)
-                if "error" not in test_response:
-                    print("✅ 博查搜索API连接成功")
-                else:
-                    print(f"⚠️ 博查搜索API测试失败: {test_response['error']}")
-            except Exception as e:
-                print(f"❌ 博查搜索API连接失败: {e}")
-        else:
-            print("⚠️ 跳过博查API测试（未设置API密钥）")
-            
+
+        # 测试SearxNG API连接
+        try:
+            print("🔧 开始测试SearxNG API连接...")
+            test_response = self._search_searxng("test query", count=1)
+            if test_response and "results" in test_response:
+                print("✅ SearxNG搜索API连接成功")
+            else:
+                print("⚠️ SearxNG搜索API测试失败")
+        except Exception as e:
+            print(f"❌ SearxNG搜索API连接失败: {e}")
+
         # 测试LightRAG连接
         try:
             response = requests.get(f"{self.valves.LIGHTRAG_BASE_URL}/health", timeout=5)
@@ -116,7 +114,7 @@ class Pipeline:
             print(f"❌ 无法连接到LightRAG服务: {e}")
 
     async def on_shutdown(self):
-        print(f"Search LightRAG Pipeline关闭: {__name__}")
+        print(f"SearxNG LightRAG Pipeline关闭: {__name__}")
 
     def _estimate_tokens(self, text: str) -> int:
         """
@@ -162,79 +160,123 @@ class Pipeline:
         """获取token统计信息"""
         return self.token_stats.copy()
 
-    def _search_bocha(self, query: str, count: int = None) -> dict:
-        """调用博查Web Search API"""
-        url = f"{self.valves.BOCHA_BASE_URL}/web-search"
+    def _search_searxng(self, query: str, count: int = None, max_retries: int = 2) -> dict:
+        """调用SearxNG API进行搜索，带重试机制"""
+        url = f"{self.valves.SEARXNG_URL}/search"
 
-        search_count = count or self.valves.BOCHA_SEARCH_COUNT
-        if search_count < 1 or search_count > 20:
-            search_count = min(max(search_count, 1), 20)
+        # 参数验证
+        search_count = count or self.valves.SEARXNG_SEARCH_COUNT
+        if search_count < 1:
+            search_count = 1
 
-        payload = {
-            "query": query.strip(),
-            "count": search_count,
-            "summary": self.valves.BOCHA_ENABLE_SUMMARY
+        # 构建请求参数 - 不指定特定搜索引擎，让SearXNG自动选择可用的引擎
+        params = {
+            'q': query.strip(),
+            'format': 'json',
+            'language': self.valves.SEARXNG_LANGUAGE,
+            'safesearch': self.valves.SEARXNG_SAFESEARCH,
+            'categories': self.valves.SEARXNG_CATEGORIES
         }
 
-        headers = {
-            "Authorization": f"Bearer {self.valves.BOCHA_API_KEY}",
-            "Content-Type": "application/json"
-        }
+        # 添加可选参数
+        if self.valves.SEARXNG_TIME_RANGE:
+            params['time_range'] = self.valves.SEARXNG_TIME_RANGE
 
-        try:
-            if self.valves.DEBUG_MODE:
-                print(f"🔍 博查搜索: {query}")
+        # 重试逻辑
+        for attempt in range(max_retries + 1):
+            try:
+                # 添加详细的调试信息
+                if self.valves.DEBUG_MODE:
+                    print(f"🔍 SearxNG搜索调试信息 (尝试 {attempt + 1}/{max_retries + 1}):")
+                    print(f"   URL: {url}")
+                    print(f"   请求参数: {json.dumps(params, ensure_ascii=False, indent=2)}")
 
-            response = requests.post(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=self.valves.BOCHA_TIMEOUT
-            )
-            response.raise_for_status()
-            result = response.json()
+                response = requests.get(
+                    url,
+                    params=params,
+                    timeout=self.valves.SEARXNG_TIMEOUT
+                )
 
-            if self.valves.DEBUG_MODE:
-                print(f"✅ 搜索成功，获得 {len(result.get('data', {}).get('webPages', {}).get('value', []))} 条结果")
+                # 添加响应调试信息
+                if self.valves.DEBUG_MODE:
+                    print(f"   响应状态码: {response.status_code}")
+                    if response.status_code != 200:
+                        print(f"   响应内容: {response.text}")
 
-            return result
-        except Exception as e:
-            error_msg = f"博查搜索失败: {str(e)}"
-            if self.valves.DEBUG_MODE:
-                print(f"❌ {error_msg}")
-            return {"error": error_msg}
+                response.raise_for_status()
+                result = response.json()
+
+                if self.valves.DEBUG_MODE:
+                    print(f"   响应成功，数据长度: {len(str(result))}")
+                    if isinstance(result, dict):
+                        print(f"   找到结果数量: {result.get('number_of_results', 0)}")
+
+                return result
+
+            except requests.exceptions.Timeout:
+                if attempt < max_retries:
+                    if self.valves.DEBUG_MODE:
+                        print(f"⚠️ 搜索超时，{2}秒后重试 (尝试 {attempt + 1}/{max_retries + 1})")
+                    time.sleep(2)
+                    continue
+                else:
+                    error_msg = "SearxNG搜索超时，可能是搜索引擎连接问题，请稍后重试"
+                    if self.valves.DEBUG_MODE:
+                        print(f"❌ {error_msg}")
+                        print("   提示：如果持续超时，可能是后端搜索引擎不可用")
+                    return {"error": error_msg}
+            except Exception as e:
+                if attempt < max_retries:
+                    if self.valves.DEBUG_MODE:
+                        print(f"⚠️ 搜索出错，{2}秒后重试: {str(e)}")
+                    time.sleep(2)
+                    continue
+                else:
+                    # 处理其他异常
+                    break
+
+        # 如果所有重试都失败，返回错误
+        return {"error": "SearxNG搜索失败，请稍后重试"}
 
     def _format_search_results(self, search_response: dict) -> str:
         """格式化搜索结果为文本"""
         if "error" in search_response:
             return f"搜索错误: {search_response['error']}"
 
-        data = search_response.get("data", {})
-        if not data:
-            return "搜索响应数据为空"
+        # 检查响应结构
+        if not isinstance(search_response, dict):
+            return "搜索响应格式错误"
 
-        web_pages_data = data.get("webPages", {})
-        web_pages = web_pages_data.get("value", [])
-
-        if not web_pages:
-            return "未找到相关搜索结果"
+        # 检查SearxNG API的响应结构
+        results = search_response.get("results", [])
+        if not results:
+            return "未找到相关搜索结果，请尝试其他关键词"
 
         formatted_results = []
-        for i, page in enumerate(web_pages[:self.valves.BOCHA_SEARCH_COUNT], 1):
-            title = page.get("name", "无标题").strip()
-            url = page.get("url", "").strip()
-            snippet = page.get("snippet", "").strip()
-            summary = page.get("summary", "").strip()
+        total_results = search_response.get("number_of_results", 0)
 
+        # 限制显示的结果数量
+        display_count = min(len(results), self.valves.SEARXNG_SEARCH_COUNT)
+
+        for i, result in enumerate(results[:display_count], 1):
+            title = result.get("title", "无标题").strip()
+            url = result.get("url", "").strip()
+            content = result.get("content", "").strip()
+
+            # 清理和截断内容
+            if content:
+                # 移除多余的空白字符
+                content = ' '.join(content.split())
+                # 如果内容太长，截断并添加省略号
+                if len(content) > 200:
+                    content = content[:200] + "..."
+
+            # 格式化单个结果
             result_text = f"{i}. {title}\n"
             if url:
                 result_text += f"   链接: {url}\n"
-            
-            content_to_show = summary if summary else snippet
-            if content_to_show:
-                if len(content_to_show) > 200:
-                    content_to_show = content_to_show[:200] + "..."
-                result_text += f"   内容: {content_to_show}\n"
+            if content:
+                result_text += f"   内容: {content}\n"
 
             formatted_results.append(result_text)
 
@@ -245,20 +287,17 @@ class Pipeline:
         if "error" in search_response:
             return ""
 
-        data = search_response.get("data", {})
-        if not data:
-            return ""
-
-        web_pages_data = data.get("webPages", {})
-        web_pages = web_pages_data.get("value", [])
-
-        if not web_pages:
+        # 检查SearxNG API的响应结构
+        results = search_response.get("results", [])
+        if not results:
             return ""
 
         formatted_links = []
-        for i, page in enumerate(web_pages[:self.valves.BOCHA_SEARCH_COUNT], 1):
-            title = page.get("name", "无标题").strip()
-            url = page.get("url", "").strip()
+        display_count = min(len(results), self.valves.SEARXNG_SEARCH_COUNT)
+
+        for i, result in enumerate(results[:display_count], 1):
+            title = result.get("title", "无标题").strip()
+            url = result.get("url", "").strip()
 
             if url and title:
                 # 格式化为MD链接格式
@@ -312,20 +351,6 @@ class Pipeline:
         except Exception as e:
             raise Exception(f"OpenAI API调用失败: {str(e)}")
 
-    def _parse_stream_response(self, response) -> Iterator[dict]:
-        """解析流式响应"""
-        for line in response.iter_lines():
-            if line:
-                line = line.decode('utf-8')
-                if line.startswith('data: '):
-                    data = line[6:]
-                    if data.strip() == '[DONE]':
-                        break
-                    try:
-                        yield json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
-
     def _parse_stream_response_with_tokens(self, response) -> Iterator[dict]:
         """解析流式响应并统计token"""
         for line in response.iter_lines():
@@ -347,37 +372,61 @@ class Pipeline:
                         continue
 
     def _stage1_optimize_query(self, user_query: str, messages: List[dict]) -> str:
-        """第一阶段：LLM问题优化"""
+        """第一阶段：基于对话历史的LLM问题优化"""
         context_messages = []
+
         if messages and len(messages) > 1:
-            recent_messages = messages[-6:]
+            # 获取更多历史消息以获得更好的上下文理解
+            recent_messages = messages[-6:]  # 默认3轮对话（6条消息）
             context_text = ""
+            conversation_topics = []
+
+            # 构建对话历史并提取主题
             for msg in recent_messages:
                 role = msg.get("role", "")
                 content = msg.get("content", "")
                 if role == "user":
                     context_text += f"用户: {content}\n"
+                    # 简单提取用户关注的主题关键词
+                    if len(content) > 10:  # 过滤太短的内容
+                        conversation_topics.append(content[:50])  # 取前50字符作为主题
                 elif role == "assistant":
                     context_text += f"助手: {content}\n"
 
             if context_text.strip():
+                topics_summary = "、".join(conversation_topics[-3:]) if conversation_topics else "无特定主题"
+
                 context_messages.append({
                     "role": "user",
-                    "content": f"""请基于以下对话历史和当前问题，生成一个优化的搜索查询。
+                    "content": f"""请基于完整的对话历史和当前问题，生成一个优化的网络搜索查询。
 
-对话历史:
-{context_text}
+**对话历史**:
+{context_text.strip()}
 
-当前问题: {user_query}
+**对话主题总结**: {topics_summary}
 
-请生成一个更精准、更丰富的搜索查询，要求：
-1. 结合对话上下文，理解用户的真实意图
-2. 补充相关的关键词和概念
-3. 使查询更具体和准确
-4. 保持查询简洁但信息丰富
-5. 只返回优化后的查询文本，不要其他解释
+**当前问题**: {user_query}
 
-优化后的查询:"""
+**优化任务**:
+请深度分析对话历史，理解用户的连续性需求和关注焦点，然后生成一个优化的搜索查询：
+
+1. **上下文理解**：
+   - 分析用户在对话中的关注点演变
+   - 识别与当前问题相关的历史信息
+   - 理解用户可能的深层需求
+
+2. **查询优化策略**：
+   - 结合对话历史中的关键实体和概念
+   - 补充相关的专业术语和关键词
+   - 考虑时间、地点、人物等重要信息
+   - 保持查询的针对性和准确性
+
+3. **输出要求**：
+   - 生成一个简洁但信息丰富的搜索查询
+   - 长度控制在10-50字之间
+   - 只返回优化后的查询文本，不要解释
+
+**优化后的搜索查询**:"""
                 })
 
         if not context_messages:
@@ -385,15 +434,16 @@ class Pipeline:
                 "role": "user",
                 "content": f"""请优化以下搜索查询，使其更精准和丰富：
 
-原始问题: {user_query}
+**原始问题**: {user_query}
 
-请生成一个优化的搜索查询，要求：
-1. 补充相关的关键词和概念
+**优化要求**:
+1. 补充相关的关键词和专业术语
 2. 使查询更具体和准确
 3. 保持查询简洁但信息丰富
-4. 只返回优化后的查询文本，不要其他解释
+4. 考虑可能的相关概念和实体
+5. 只返回优化后的查询文本，不要解释
 
-优化后的查询:"""
+**优化后的搜索查询**:"""
             })
 
         try:
@@ -415,7 +465,7 @@ class Pipeline:
 
     def _stage2_search(self, optimized_query: str) -> tuple[str, str, str]:
         """第二阶段：搜索"""
-        search_response = self._search_bocha(optimized_query)
+        search_response = self._search_searxng(optimized_query)
         search_results = self._format_search_results(search_response)
         search_links = self._extract_search_links(search_response)
 
@@ -429,10 +479,16 @@ class Pipeline:
         return search_results, search_status, search_links
 
     def _stage3_generate_lightrag_query(self, original_query: str, search_results: str, messages: List[dict]) -> str:
-        """第三阶段：根据搜索结果生成增强的LightRAG查询"""
+        """第三阶段：根据搜索结果和对话历史生成增强的LightRAG查询"""
+        # 提取更完整的对话历史
         context_text = ""
+        conversation_summary = ""
+
         if messages and len(messages) > 1:
-            recent_messages = messages[-4:]
+            # 获取更多的历史消息以获得更好的上下文
+            recent_messages = messages[-6:]  # 默认3轮对话（6条消息）
+
+            # 构建对话历史文本
             for msg in recent_messages:
                 role = msg.get("role", "")
                 content = msg.get("content", "")
@@ -441,34 +497,51 @@ class Pipeline:
                 elif role == "assistant":
                     context_text += f"助手: {content}\n"
 
-        prompt_content = f"""你是一个专业的知识图谱查询专家，请基于以下信息生成一个详细、精细、带思考的LightRAG检索问题。
+            # 生成对话摘要，帮助理解上下文
+            if context_text.strip():
+                conversation_summary = f"""
+基于对话历史，用户可能关注的主题和背景：
+{context_text.strip()}
 
-用户原始问题: {original_query}
+这表明用户在此次对话中的关注点和需求背景。"""
 
-网络搜索结果:
-{search_results}"""
+        # 构建更详细的提示词
+        context_analysis = conversation_summary if conversation_summary else "\n这是用户的首次提问，没有前序对话历史。"
 
-        if context_text.strip():
-            prompt_content += f"""
+        prompt_content = f"""你是一个专业的知识图谱查询专家。请基于以下完整信息生成一个详细、精细、带深度思考的LightRAG检索问题。
 
-对话历史:
-{context_text}"""
+**当前用户问题**: {original_query}
 
-        prompt_content += """
+**网络搜索获得的最新信息**:
+{search_results}
 
-请遵循以下要求生成LightRAG查询：
-1. 结合用户问题、搜索结果和对话历史，深入理解用户的真实需求
-2. 分析搜索结果中的关键信息、实体和关系
-3. 生成一个较长、精细、带思考过程的查询问题
-4. 查询应该包含：
-   - 核心问题的详细描述
-   - 相关实体和概念
-   - 可能的关联关系
-   - 思考角度和分析维度
-5. 查询长度应在100-300字之间
-6. 只返回生成的LightRAG查询文本，不要其他解释
+**对话上下文分析**:{context_analysis}
 
-生成的LightRAG查询:"""
+**任务要求**:
+请综合分析以上三个方面的信息，生成一个高质量的LightRAG查询：
+
+1. **深度理解用户意图**：
+   - 结合对话历史理解用户的真实需求和关注点
+   - 识别用户问题的核心关键词和隐含需求
+   - 考虑用户可能的后续问题和深层次需求
+
+2. **充分利用搜索结果**：
+   - 提取搜索结果中的关键实体、概念和事实
+   - 识别重要的时间、地点、人物、事件等信息
+   - 分析搜索结果中的关联关系和因果关系
+
+3. **构建综合性查询**：
+   - 将用户问题、搜索信息和对话背景有机结合
+   - 生成一个包含多个维度和角度的详细查询
+   - 查询应该能够引导LightRAG进行深度分析和推理
+
+4. **查询格式要求**：
+   - 长度控制在150-400字之间
+   - 包含具体的实体名称、关键概念和分析角度
+   - 体现思考过程和分析逻辑
+   - 语言自然流畅，逻辑清晰
+
+**请直接输出生成的LightRAG查询，不要包含其他解释文字**："""
 
         query_messages = [{
             "role": "user",
@@ -577,7 +650,10 @@ class Pipeline:
         yield "data: [DONE]\n\n"
 
     def pipe(
-        self, user_message: str, model_id: str, messages: List[dict], body: dict
+        self, user_message: str, model_id: str, messages: List[dict], body: dict,
+        __event_emitter__=None, 
+        __event_call__=None,
+        __user__=None
     ) -> Union[str, Generator, Iterator]:
         """
         处理用户查询的主要方法 - 4阶段pipeline
@@ -595,9 +671,6 @@ class Pipeline:
         self._reset_token_stats()
 
         # 验证必需参数
-        if not self.valves.BOCHA_API_KEY:
-            return "❌ 错误：缺少博查API密钥，请在配置中设置BOCHA_API_KEY"
-
         if not self.valves.OPENAI_API_KEY:
             return "❌ 错误：缺少OpenAI API密钥，请在配置中设置OPENAI_API_KEY"
 
@@ -652,7 +725,7 @@ class Pipeline:
             search_msg = {
                 'choices': [{
                     'delta': {
-                        'content': "\n**🔍 第二阶段：网络搜索**\n正在搜索相关信息..."
+                        'content': "\n**🔍 第二阶段：SearxNG搜索**\n正在搜索相关信息..."
                     },
                     'finish_reason': None
                 }]
@@ -758,7 +831,7 @@ class Pipeline:
             # 构建完整响应
             response_parts = []
             response_parts.append(f"**🔧 第一阶段：问题优化**\n原始问题: {query}\n优化后查询: {optimized_query}")
-            response_parts.append(f"\n**🔍 第二阶段：网络搜索**\n{search_status}")
+            response_parts.append(f"\n**🔍 第二阶段：SearxNG搜索**\n{search_status}")
 
             if search_results and "搜索错误" not in search_results:
                 # 显示搜索结果摘要
@@ -779,7 +852,7 @@ class Pipeline:
             token_info = f"\n\n---\n**Token消耗统计**\n- 输入Token: {token_stats['input_tokens']:,}\n- 输出Token: {token_stats['output_tokens']:,}\n- 总Token: {token_stats['total_tokens']:,}"
 
             # 添加配置信息
-            config_info = f"\n\n**配置信息**\n- 搜索结果数量: {self.valves.BOCHA_SEARCH_COUNT}\n- LightRAG模式: {self.valves.LIGHTRAG_DEFAULT_MODE}\n- 模型: {self.valves.OPENAI_MODEL}"
+            config_info = f"\n\n**配置信息**\n- 搜索结果数量: {self.valves.SEARXNG_SEARCH_COUNT}\n- LightRAG模式: {self.valves.LIGHTRAG_DEFAULT_MODE}\n- 模型: {self.valves.OPENAI_MODEL}"
 
             return "\n".join(response_parts) + token_info + config_info
 

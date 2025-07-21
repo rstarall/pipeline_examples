@@ -16,6 +16,92 @@ from typing import List, Union, Generator, Iterator
 from pydantic import BaseModel
 
 
+class HistoryContextManager:
+    """历史会话上下文管理器 - 统一处理历史会话信息"""
+    
+    DEFAULT_HISTORY_TURNS = 3  # 默认3轮对话（6条消息）
+    
+    @classmethod
+    def extract_recent_context(cls, messages: List[dict], max_turns: int = None) -> str:
+        """
+        提取最近的历史会话上下文
+        
+        Args:
+            messages: 消息列表
+            max_turns: 最大轮次数，默认为3轮
+        
+        Returns:
+            格式化的历史上下文字符串
+        """
+        if not messages or len(messages) < 2:
+            return ""
+            
+        max_turns = max_turns or cls.DEFAULT_HISTORY_TURNS
+        max_messages = max_turns * 2  # 每轮包含用户和助手消息
+        
+        recent_messages = messages[-max_messages:] if len(messages) > max_messages else messages
+        context_text = ""
+        
+        for msg in recent_messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "user":
+                context_text += f"用户: {content}\n"
+            elif role == "assistant":
+                context_text += f"助手: {content}\n"
+                
+        return context_text.strip()
+    
+    @classmethod
+    def format_answer_prompt(cls,
+                           original_query: str,
+                           search_results: str,
+                           messages: List[dict],
+                           max_turns: int = None) -> str:
+        """
+        格式化答案生成提示模板
+        
+        Args:
+            original_query: 原始用户查询
+            search_results: 搜索结果
+            messages: 历史消息
+            max_turns: 最大历史轮次
+            
+        Returns:
+            格式化的提示文本
+        """
+        context_text = cls.extract_recent_context(messages, max_turns)
+        
+        prompt_content = f"""基于以下搜索结果回答用户的问题。
+
+搜索结果:
+{search_results}
+
+当前问题: {original_query}"""
+
+        if context_text.strip():
+            prompt_content = f"""基于以下对话历史和搜索结果回答用户的问题。
+
+对话历史:
+{context_text}
+
+搜索结果:
+{search_results}
+
+当前问题: {original_query}"""
+
+        prompt_content += """
+
+请根据搜索结果提供准确、详细且有用的回答：
+1. 结合对话历史和搜索结果，理解用户的真实需求
+2. 基于搜索到的信息提供准确回答
+3. 如果搜索结果不足以完全回答问题，请说明哪些部分需要更多信息
+4. 保持回答的结构清晰，使用适当的格式
+5. 在必要时提供相关的链接或参考资料"""
+
+        return prompt_content
+
+
 class Pipeline:
     class Valves(BaseModel):
         # SearxNG搜索API配置
@@ -38,6 +124,9 @@ class Pipeline:
         # Pipeline配置
         ENABLE_STREAMING: bool
         DEBUG_MODE: bool
+        
+        # 历史会话配置
+        HISTORY_TURNS: int
 
     def __init__(self):
         self.name = "SearxNG Search OpenAI Pipeline"
@@ -70,6 +159,9 @@ class Pipeline:
                 # Pipeline配置
                 "ENABLE_STREAMING": os.getenv("ENABLE_STREAMING", "true").lower() == "true",
                 "DEBUG_MODE": os.getenv("DEBUG_MODE", "false").lower() == "true",
+                
+                # 历史会话配置
+                "HISTORY_TURNS": int(os.getenv("HISTORY_TURNS", "3")),
             }
         )
 
@@ -268,25 +360,13 @@ class Pipeline:
 
     def _optimize_search_query(self, user_message: str, messages: List[dict]) -> str:
         """优化搜索查询，考虑历史对话上下文"""
-        # 如果没有历史消息或历史消息很少，直接返回原查询
-        if not messages or len(messages) < 2:
-            return user_message
+        # 提取历史上下文用于调试显示
+        context_text = HistoryContextManager.extract_recent_context(messages, self.valves.HISTORY_TURNS)
+        
+        if self.valves.DEBUG_MODE and context_text:
+            print(f"🔄 历史上下文({self.valves.HISTORY_TURNS}轮):\n{context_text[:200]}...")
 
-        # 获取最近的几条消息作为上下文
-        recent_messages = messages[-4:] if len(messages) > 4 else messages
-        context = ""
-
-        for msg in recent_messages:
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            if role in ["user", "assistant"] and content:
-                context += f"{role}: {content[:100]}...\n"
-
-        # 如果有上下文，可以在这里添加查询优化逻辑
-        # 目前简单返回原查询，但保留了扩展的可能性
-        if self.valves.DEBUG_MODE and context:
-            print(f"🔄 查询上下文:\n{context}")
-
+        # 目前简单返回原查询，历史上下文在答案生成阶段使用
         return user_message
 
     def _stage1_search(self, query: str) -> tuple:
@@ -315,7 +395,7 @@ class Pipeline:
 
         return formatted_results, True
 
-    def _stage2_generate_answer(self, query: str, search_results: str, stream: bool = False) -> Union[str, Generator]:
+    def _stage2_generate_answer(self, query: str, search_results: str, messages: List[dict] = None, stream: bool = False) -> Union[str, Generator]:
         """第二阶段：使用OpenAI生成回答"""
         if not self.valves.OPENAI_API_KEY:
             return "错误: 未设置OpenAI API密钥"
@@ -324,21 +404,23 @@ class Pipeline:
 
 请遵循以下原则：
 1. 主要基于提供的搜索结果回答用户问题
-2. 如果搜索结果包含相关信息，请提供详细、准确的回答
-3. 引用搜索结果时使用编号（如[1]、[2]等）来标注信息来源
-4. 如果搜索结果信息不足，请诚实说明并提供可能的建议
-5. 不要编造或推测搜索结果中没有的信息
-6. 回答要结构清晰，重点突出
-7. 如果发现搜索结果中有矛盾信息，请指出并说明
+2. 结合对话历史理解用户的真实需求和上下文
+3. 如果搜索结果包含相关信息，请提供详细、准确的回答
+4. 引用搜索结果时使用编号（如[1]、[2]等）来标注信息来源
+5. 如果搜索结果信息不足，请诚实说明并提供可能的建议
+6. 不要编造或推测搜索结果中没有的信息
+7. 回答要结构清晰，重点突出
+8. 如果发现搜索结果中有矛盾信息，请指出并说明
 
 请用中文回答，语言要自然流畅。"""
 
-        user_prompt = f"""用户问题: {query}
-
-搜索结果:
-{search_results}
-
-请根据以上搜索结果回答用户问题。"""
+        # 使用历史上下文管理器生成提示
+        user_prompt = HistoryContextManager.format_answer_prompt(
+            original_query=query,
+            search_results=search_results,
+            messages=messages or [],
+            max_turns=self.valves.HISTORY_TURNS
+        )
 
         url = f"{self.valves.OPENAI_BASE_URL}/chat/completions"
         
@@ -486,10 +568,10 @@ class Pipeline:
                     stream_mode = body.get("stream", False) and self.valves.ENABLE_STREAMING
 
                     if stream_mode:
-                        for chunk in self._stage2_generate_answer(user_message, fallback_prompt, stream=True):
+                        for chunk in self._stage2_generate_answer(user_message, fallback_prompt, messages, stream=True):
                             yield chunk
                     else:
-                        result = self._stage2_generate_answer(user_message, fallback_prompt, stream=False)
+                        result = self._stage2_generate_answer(user_message, fallback_prompt, messages, stream=False)
                         yield result
                         # 添加token统计信息
                         token_info = self._get_token_stats()
@@ -511,14 +593,14 @@ class Pipeline:
         try:
             if stream_mode:
                 # 流式模式
-                for chunk in self._stage2_generate_answer(user_message, search_results, stream=True):
+                for chunk in self._stage2_generate_answer(user_message, search_results, messages, stream=True):
                     yield chunk
                 # 流式模式结束后添加token统计
                 token_info = self._get_token_stats()
                 yield f"\n\n---\n📊 **Token统计**: 输入 {token_info['input_tokens']}, 输出 {token_info['output_tokens']}, 总计 {token_info['total_tokens']}"
             else:
                 # 非流式模式
-                result = self._stage2_generate_answer(user_message, search_results, stream=False)
+                result = self._stage2_generate_answer(user_message, search_results, messages, stream=False)
                 yield result
                 # 添加token统计信息
                 token_info = self._get_token_stats()

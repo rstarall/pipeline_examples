@@ -1,10 +1,10 @@
 """
-title: Bocha Search OpenAI Pipeline
+title: Search LightRAG Pipeline
 author: open-webui
 date: 2024-12-20
-version: 2.0
+version: 1.0
 license: MIT
-description: A 3-stage pipeline: 1) LLM query optimization, 2) Web search using Bocha API, 3) AI-enhanced Q&A with OpenAI API
+description: A 4-stage pipeline: 1) Query optimization, 2) Web search using Bocha API, 3) Generate enhanced LightRAG query, 4) LightRAG Q&A
 requirements: requests, pydantic
 """
 
@@ -13,6 +13,150 @@ import json
 import requests
 from typing import List, Union, Generator, Iterator
 from pydantic import BaseModel
+
+
+class HistoryContextManager:
+    """历史会话上下文管理器 - 统一处理历史会话信息"""
+    
+    DEFAULT_HISTORY_TURNS = 3  # 默认3轮对话（6条消息）
+    
+    @classmethod
+    def extract_recent_context(cls, messages: List[dict], max_turns: int = None) -> str:
+        """
+        提取最近的历史会话上下文
+        
+        Args:
+            messages: 消息列表
+            max_turns: 最大轮次数，默认为3轮
+        
+        Returns:
+            格式化的历史上下文字符串
+        """
+        if not messages or len(messages) < 2:
+            return ""
+            
+        max_turns = max_turns or cls.DEFAULT_HISTORY_TURNS
+        max_messages = max_turns * 2  # 每轮包含用户和助手消息
+        
+        recent_messages = messages[-max_messages:] if len(messages) > max_messages else messages
+        context_text = ""
+        
+        for msg in recent_messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "user":
+                context_text += f"用户: {content}\n"
+            elif role == "assistant":
+                context_text += f"助手: {content}\n"
+                
+        return context_text.strip()
+    
+    @classmethod
+    def format_query_optimization_prompt(cls, 
+                                       user_query: str, 
+                                       messages: List[dict], 
+                                       domain: str = None,
+                                       max_turns: int = None) -> str:
+        """
+        格式化查询优化提示模板
+        
+        Args:
+            user_query: 用户当前查询
+            messages: 历史消息
+            domain: 专业领域（可选）
+            max_turns: 最大历史轮次
+            
+        Returns:
+            格式化的提示文本
+        """
+        context_text = cls.extract_recent_context(messages, max_turns)
+        
+        if context_text:
+            domain_prefix = f"{domain}专业" if domain else ""
+            
+            return f"""请基于以下对话历史和当前问题，生成一个优化的{domain_prefix}搜索查询。
+
+对话历史:
+{context_text}
+
+当前问题: {user_query}
+
+请生成一个更精准、更丰富的搜索查询，要求：
+1. 结合对话上下文，理解用户的真实意图
+2. 补充相关的关键词和概念
+3. 使查询更具体和准确
+4. 保持查询简洁但信息丰富
+5. 只返回优化后的查询文本，不要其他解释
+
+优化后的查询:"""
+        else:
+            domain_prefix = f"{domain}专业" if domain else ""
+            return f"""请优化以下搜索查询，使其更精准和丰富：
+
+原始问题: {user_query}
+
+请生成一个优化的{domain_prefix}搜索查询，要求：
+1. 补充相关的关键词和概念
+2. 使查询更具体和准确
+3. 保持查询简洁但信息丰富
+4. 只返回优化后的查询文本，不要其他解释
+
+优化后的查询:"""
+
+    @classmethod
+    def format_lightrag_query_prompt(cls,
+                                   original_query: str,
+                                   search_results: str,
+                                   messages: List[dict],
+                                   domain: str = None,
+                                   max_turns: int = None) -> str:
+        """
+        格式化LightRAG查询生成提示模板
+        
+        Args:
+            original_query: 原始用户查询
+            search_results: 搜索结果
+            messages: 历史消息
+            domain: 专业领域
+            max_turns: 最大历史轮次
+            
+        Returns:
+            格式化的提示文本
+        """
+        context_text = cls.extract_recent_context(messages, max_turns)
+        
+        prompt_content = f"""你是一个专业的知识图谱查询专家，请基于以下信息生成一个详细、精细、带思考的LightRAG检索问题。
+
+用户原始问题: {original_query}
+
+网络搜索结果:
+{search_results}"""
+
+        if context_text.strip():
+            prompt_content += f"""
+
+对话历史:
+{context_text}"""
+
+        domain_context = f"在{domain}专业领域中，" if domain else ""
+
+        prompt_content += f"""
+
+请遵循以下要求生成LightRAG查询：
+1. {domain_context}结合用户问题、搜索结果和对话历史，深入理解用户的真实需求
+2. 分析搜索结果中的关键信息、实体和关系
+3. 生成一个较长、精细、带思考过程的查询问题
+4. 查询应该包含：
+   - 核心问题的详细描述
+   - 相关实体和概念
+   - 可能的关联关系
+   - 思考角度和分析维度
+5. 查询长度应在100-300字之间
+6. 只返回生成的LightRAG查询文本，不要其他解释
+
+生成的LightRAG查询:"""
+
+        return prompt_content
 
 
 class Pipeline:
@@ -24,21 +168,30 @@ class Pipeline:
         BOCHA_FRESHNESS: str
         BOCHA_ENABLE_SUMMARY: bool
         BOCHA_TIMEOUT: int
-
-        # OpenAI配置
+        
+        # OpenAI配置（用于问题优化和LightRAG查询生成）
         OPENAI_API_KEY: str
         OPENAI_BASE_URL: str
         OPENAI_MODEL: str
         OPENAI_TIMEOUT: int
         OPENAI_MAX_TOKENS: int
         OPENAI_TEMPERATURE: float
-
+        
+        # LightRAG配置
+        LIGHTRAG_BASE_URL: str
+        LIGHTRAG_DEFAULT_MODE: str
+        LIGHTRAG_TIMEOUT: int
+        LIGHTRAG_ENABLE_STREAMING: bool
+        
         # Pipeline配置
         ENABLE_STREAMING: bool
         DEBUG_MODE: bool
+        
+        # 历史会话配置
+        HISTORY_TURNS: int
 
     def __init__(self):
-        self.name = "Bocha Search OpenAI Pipeline"
+        self.name = "Search LightRAG Pipeline"
         # 初始化token统计
         self.token_stats = {
             "input_tokens": 0,
@@ -52,7 +205,7 @@ class Pipeline:
                 "BOCHA_API_KEY": os.getenv("BOCHA_API_KEY", ""),
                 "BOCHA_BASE_URL": os.getenv("BOCHA_BASE_URL", "https://api.bochaai.com/v1"),
                 "BOCHA_SEARCH_COUNT": int(os.getenv("BOCHA_SEARCH_COUNT", "8")),
-                "BOCHA_FRESHNESS": os.getenv("BOCHA_FRESHNESS", "oneYear"),  # oneDay, oneWeek, oneMonth, oneYear, all
+                "BOCHA_FRESHNESS": os.getenv("BOCHA_FRESHNESS", "oneYear"),
                 "BOCHA_ENABLE_SUMMARY": os.getenv("BOCHA_ENABLE_SUMMARY", "true").lower() == "true",
                 "BOCHA_TIMEOUT": int(os.getenv("BOCHA_TIMEOUT", "30")),
                 
@@ -64,14 +217,23 @@ class Pipeline:
                 "OPENAI_MAX_TOKENS": int(os.getenv("OPENAI_MAX_TOKENS", "4000")),
                 "OPENAI_TEMPERATURE": float(os.getenv("OPENAI_TEMPERATURE", "0.7")),
                 
+                # LightRAG配置
+                "LIGHTRAG_BASE_URL": os.getenv("LIGHTRAG_BASE_URL", "http://localhost:9621"),
+                "LIGHTRAG_DEFAULT_MODE": os.getenv("LIGHTRAG_DEFAULT_MODE", "hybrid"),
+                "LIGHTRAG_TIMEOUT": int(os.getenv("LIGHTRAG_TIMEOUT", "30")),
+                "LIGHTRAG_ENABLE_STREAMING": os.getenv("LIGHTRAG_ENABLE_STREAMING", "true").lower() == "true",
+                
                 # Pipeline配置
                 "ENABLE_STREAMING": os.getenv("ENABLE_STREAMING", "true").lower() == "true",
-                "DEBUG_MODE": os.getenv("DEBUG_MODE", "true").lower() == "true",  # 临时强制启用调试
+                "DEBUG_MODE": os.getenv("DEBUG_MODE", "false").lower() == "true",
+                
+                # 历史会话配置
+                "HISTORY_TURNS": int(os.getenv("HISTORY_TURNS", "3")),
             }
         )
 
     async def on_startup(self):
-        print(f"Bocha Search OpenAI Pipeline启动: {__name__}")
+        print(f"Search LightRAG Pipeline启动: {__name__}")
         
         # 验证必需的API密钥
         if not self.valves.BOCHA_API_KEY:
@@ -92,9 +254,19 @@ class Pipeline:
                 print(f"❌ 博查搜索API连接失败: {e}")
         else:
             print("⚠️ 跳过博查API测试（未设置API密钥）")
+            
+        # 测试LightRAG连接
+        try:
+            response = requests.get(f"{self.valves.LIGHTRAG_BASE_URL}/health", timeout=5)
+            if response.status_code == 200:
+                print("✅ LightRAG服务连接成功")
+            else:
+                print(f"⚠️ LightRAG服务响应异常: {response.status_code}")
+        except Exception as e:
+            print(f"❌ 无法连接到LightRAG服务: {e}")
 
     async def on_shutdown(self):
-        print(f"Bocha Search OpenAI Pipeline关闭: {__name__}")
+        print(f"Search LightRAG Pipeline关闭: {__name__}")
 
     def _estimate_tokens(self, text: str) -> int:
         """
@@ -144,12 +316,10 @@ class Pipeline:
         """调用博查Web Search API"""
         url = f"{self.valves.BOCHA_BASE_URL}/web-search"
 
-        # 参数验证
         search_count = count or self.valves.BOCHA_SEARCH_COUNT
         if search_count < 1 or search_count > 20:
-            search_count = min(max(search_count, 1), 20)  # 限制在1-20之间
+            search_count = min(max(search_count, 1), 20)
 
-        # 根据示例，去掉freshness参数，只保留核心参数
         payload = {
             "query": query.strip(),
             "count": search_count,
@@ -162,13 +332,8 @@ class Pipeline:
         }
 
         try:
-            # 添加详细的调试信息
             if self.valves.DEBUG_MODE:
-                print("🔍 博查搜索调试信息:")
-                print(f"   URL: {url}")
-                print(f"   API Key前缀: {self.valves.BOCHA_API_KEY[:10]}..." if self.valves.BOCHA_API_KEY else "   API Key: 未设置")
-                print(f"   请求载荷: {json.dumps(payload, ensure_ascii=False, indent=2)}")
-                print(f"   请求头: {headers}")
+                print(f"🔍 博查搜索: {query}")
 
             response = requests.post(
                 url,
@@ -176,49 +341,15 @@ class Pipeline:
                 headers=headers,
                 timeout=self.valves.BOCHA_TIMEOUT
             )
-
-            # 添加响应调试信息
-            if self.valves.DEBUG_MODE:
-                print(f"   响应状态码: {response.status_code}")
-                print(f"   响应头: {dict(response.headers)}")
-                if response.status_code != 200:
-                    print(f"   响应内容: {response.text}")
-
             response.raise_for_status()
             result = response.json()
 
             if self.valves.DEBUG_MODE:
-                print(f"   响应成功，数据长度: {len(str(result))}")
-                # 打印响应结构以便调试
-                if isinstance(result, dict):
-                    print(f"   响应结构: code={result.get('code')}, msg={result.get('msg')}")
-                    data = result.get('data', {})
-                    if data:
-                        web_pages = data.get('webPages', {})
-                        if web_pages:
-                            value_count = len(web_pages.get('value', []))
-                            print(f"   搜索结果数量: {value_count}")
+                print(f"✅ 搜索成功，获得 {len(result.get('data', {}).get('webPages', {}).get('value', []))} 条结果")
 
             return result
-        except requests.exceptions.Timeout:
-            error_msg = "博查搜索超时，请稍后重试"
-            if self.valves.DEBUG_MODE:
-                print(f"❌ {error_msg}")
-            return {"error": error_msg}
-        except requests.exceptions.HTTPError as e:
-            error_msg = f"博查搜索HTTP错误: {e.response.status_code}"
-            if self.valves.DEBUG_MODE:
-                print(f"❌ {error_msg}")
-                if hasattr(e.response, 'text'):
-                    print(f"   错误详情: {e.response.text}")
-            return {"error": error_msg}
-        except requests.exceptions.RequestException as e:
-            error_msg = f"博查搜索网络错误: {str(e)}"
-            if self.valves.DEBUG_MODE:
-                print(f"❌ {error_msg}")
-            return {"error": error_msg}
         except Exception as e:
-            error_msg = f"博查搜索未知错误: {str(e)}"
+            error_msg = f"博查搜索失败: {str(e)}"
             if self.valves.DEBUG_MODE:
                 print(f"❌ {error_msg}")
             return {"error": error_msg}
@@ -228,11 +359,6 @@ class Pipeline:
         if "error" in search_response:
             return f"搜索错误: {search_response['error']}"
 
-        # 检查响应结构
-        if not isinstance(search_response, dict):
-            return "搜索响应格式错误"
-
-        # 检查博查API的响应结构：response.data.webPages.value
         data = search_response.get("data", {})
         if not data:
             return "搜索响应数据为空"
@@ -241,40 +367,23 @@ class Pipeline:
         web_pages = web_pages_data.get("value", [])
 
         if not web_pages:
-            return "未找到相关搜索结果，请尝试其他关键词"
+            return "未找到相关搜索结果"
 
         formatted_results = []
-        total_results = web_pages_data.get("totalEstimatedMatches", 0)
-
-        # 添加搜索统计信息
-        if total_results > 0:
-            formatted_results.append(f"找到约 {total_results:,} 条相关结果\n")
-
         for i, page in enumerate(web_pages[:self.valves.BOCHA_SEARCH_COUNT], 1):
             title = page.get("name", "无标题").strip()
             url = page.get("url", "").strip()
             snippet = page.get("snippet", "").strip()
             summary = page.get("summary", "").strip()
-            site_name = page.get("siteName", "").strip()
-            date_published = page.get("datePublished", "").strip()
 
-            result_text = f"**{i}. {title}**\n"
-
-            if site_name:
-                result_text += f"   来源: {site_name}\n"
-
-            if date_published:
-                result_text += f"   发布时间: {date_published}\n"
-
+            result_text = f"{i}. {title}\n"
             if url:
                 result_text += f"   链接: {url}\n"
-
-            # 优先显示详细摘要，如果没有则显示普通摘要
+            
             content_to_show = summary if summary else snippet
             if content_to_show:
-                # 限制摘要长度，避免过长
-                if len(content_to_show) > 300:
-                    content_to_show = content_to_show[:300] + "..."
+                if len(content_to_show) > 200:
+                    content_to_show = content_to_show[:200] + "..."
                 result_text += f"   内容: {content_to_show}\n"
 
             formatted_results.append(result_text)
@@ -286,11 +395,6 @@ class Pipeline:
         if "error" in search_response:
             return ""
 
-        # 检查响应结构
-        if not isinstance(search_response, dict):
-            return ""
-
-        # 检查博查API的响应结构：response.data.webPages.value
         data = search_response.get("data", {})
         if not data:
             return ""
@@ -355,14 +459,8 @@ class Pipeline:
                     self._add_output_tokens(output_content)
                 return result
 
-        except requests.exceptions.Timeout:
-            raise Exception("OpenAI API超时，请稍后重试")
-        except requests.exceptions.HTTPError as e:
-            raise Exception(f"OpenAI API HTTP错误: {e.response.status_code}")
-        except requests.exceptions.RequestException as e:
-            raise Exception(f"OpenAI API网络错误: {str(e)}")
         except Exception as e:
-            raise Exception(f"OpenAI API未知错误: {str(e)}")
+            raise Exception(f"OpenAI API调用失败: {str(e)}")
 
     def _parse_stream_response(self, response) -> Iterator[dict]:
         """解析流式响应"""
@@ -370,7 +468,7 @@ class Pipeline:
             if line:
                 line = line.decode('utf-8')
                 if line.startswith('data: '):
-                    data = line[6:]  # 移除 'data: ' 前缀
+                    data = line[6:]
                     if data.strip() == '[DONE]':
                         break
                     try:
@@ -384,7 +482,7 @@ class Pipeline:
             if line:
                 line = line.decode('utf-8')
                 if line.startswith('data: '):
-                    data = line[6:]  # 移除 'data: ' 前缀
+                    data = line[6:]
                     if data.strip() == '[DONE]':
                         break
                     try:
@@ -400,62 +498,19 @@ class Pipeline:
 
     def _stage1_optimize_query(self, user_query: str, messages: List[dict]) -> str:
         """第一阶段：LLM问题优化"""
-        # 构建历史对话上下文
-        context_messages = []
-        if messages and len(messages) > 1:
-            # 获取最近的几轮对话作为上下文
-            recent_messages = messages[-6:]  # 最多取最近3轮对话（用户+助手）
-            context_text = ""
-            for msg in recent_messages:
-                role = msg.get("role", "")
-                content = msg.get("content", "")
-                if role == "user":
-                    context_text += f"用户: {content}\n"
-                elif role == "assistant":
-                    context_text += f"助手: {content}\n"
-
-            if context_text.strip():
-                context_messages.append({
-                    "role": "user",
-                    "content": f"""请基于以下对话历史和当前问题，生成一个优化的搜索查询。
-
-对话历史:
-{context_text}
-
-当前问题: {user_query}
-
-请生成一个更精准、更丰富的搜索查询，要求：
-1. 结合对话上下文，理解用户的真实意图
-2. 补充相关的关键词和概念
-3. 使查询更具体和准确
-4. 保持查询简洁但信息丰富
-5. 只返回优化后的查询文本，不要其他解释
-
-优化后的查询:"""
-                })
-
-        # 如果没有历史对话，直接优化当前问题
-        if not context_messages:
-            context_messages.append({
-                "role": "user",
-                "content": f"""请优化以下搜索查询，使其更精准和丰富：
-
-原始问题: {user_query}
-
-请生成一个优化的搜索查询，要求：
-1. 补充相关的关键词和概念
-2. 使查询更具体和准确
-3. 保持查询简洁但信息丰富
-4. 只返回优化后的查询文本，不要其他解释
-
-优化后的查询:"""
-            })
+        # 使用新的历史上下文管理器
+        prompt_content = HistoryContextManager.format_query_optimization_prompt(
+            user_query=user_query,
+            messages=messages,
+            max_turns=self.valves.HISTORY_TURNS
+        )
+        
+        context_messages = [{"role": "user", "content": prompt_content}]
 
         try:
             response = self._call_openai_api(context_messages, stream=False)
             optimized_query = response['choices'][0]['message']['content'].strip()
 
-            # 如果优化失败或返回空，使用原始查询
             if not optimized_query or len(optimized_query) < 3:
                 optimized_query = user_query
 
@@ -467,7 +522,7 @@ class Pipeline:
         except Exception as e:
             if self.valves.DEBUG_MODE:
                 print(f"❌ 查询优化失败: {e}")
-            return user_query  # 优化失败时返回原始查询
+            return user_query
 
     def _stage2_search(self, optimized_query: str) -> tuple[str, str, str]:
         """第二阶段：搜索"""
@@ -484,82 +539,129 @@ class Pipeline:
 
         return search_results, search_status, search_links
 
-    def _stage3_answer(self, original_query: str, optimized_query: str, search_results: str, search_links: str, messages: List[dict], stream: bool = False) -> Union[str, Iterator[str]]:
-        """第三阶段：基于搜索结果生成增强回答"""
+    def _stage3_generate_lightrag_query(self, original_query: str, search_results: str, messages: List[dict]) -> str:
+        """第三阶段：根据搜索结果生成增强的LightRAG查询"""
+        # 使用新的历史上下文管理器
+        prompt_content = HistoryContextManager.format_lightrag_query_prompt(
+            original_query=original_query,
+            search_results=search_results,
+            messages=messages,
+            max_turns=self.valves.HISTORY_TURNS
+        )
+        
+        query_messages = [{"role": "user", "content": prompt_content}]
 
-        # 构建历史对话上下文
-        context_text = ""
-        if messages and len(messages) > 1:
-            # 获取最近的几轮对话作为上下文
-            recent_messages = messages[-4:]  # 最多取最近2轮对话
-            for msg in recent_messages:
-                role = msg.get("role", "")
-                content = msg.get("content", "")
-                if role == "user":
-                    context_text += f"用户: {content}\n"
-                elif role == "assistant":
-                    context_text += f"助手: {content}\n"
+        try:
+            response = self._call_openai_api(query_messages, stream=False)
+            lightrag_query = response['choices'][0]['message']['content'].strip()
 
-        if not search_results or "搜索错误" in search_results:
-            # 如果搜索失败，仍然尝试基于问题本身回答
-            prompt_content = f"""用户问题: {original_query}
+            if not lightrag_query or len(lightrag_query) < 20:
+                lightrag_query = f"基于以下搜索信息回答问题：{original_query}\n\n搜索结果：{search_results[:500]}..."
 
-由于搜索功能暂时不可用，请基于你的知识回答用户问题，并说明这是基于已有知识的回答，可能不包含最新信息。"""
+            if self.valves.DEBUG_MODE:
+                print(f"🔧 LightRAG查询生成: {lightrag_query[:100]}...")
 
-            if context_text.strip():
-                prompt_content = f"""对话历史:
-{context_text}
+            return lightrag_query
 
-当前问题: {original_query}
+        except Exception as e:
+            if self.valves.DEBUG_MODE:
+                print(f"❌ LightRAG查询生成失败: {e}")
+            return f"基于以下搜索信息回答问题：{original_query}\n\n搜索结果：{search_results[:500]}..."
 
-由于搜索功能暂时不可用，请基于你的知识和对话上下文回答用户问题，并说明这是基于已有知识的回答，可能不包含最新信息。"""
+    def _stage4_query_lightrag(self, lightrag_query: str, stream: bool = False) -> Union[str, Generator[str, None, None]]:
+        """第四阶段：使用LightRAG进行问答"""
+        mode = self.valves.LIGHTRAG_DEFAULT_MODE
+
+        # 统计LightRAG查询的输入token
+        self._add_input_tokens(lightrag_query)
+
+        if stream and self.valves.LIGHTRAG_ENABLE_STREAMING:
+            return self._query_lightrag_streaming(lightrag_query, mode)
         else:
-            # 构建增强提示
-            prompt_content = f"""你是一个专业的AI助手，请基于以下信息回答用户问题。
+            result = self._query_lightrag_standard(lightrag_query, mode)
+            if "error" in result:
+                return f"LightRAG查询失败: {result['error']}"
+            response_content = result.get("response", "未获取到响应内容")
+            # 统计LightRAG响应的输出token
+            self._add_output_tokens(response_content)
+            return response_content
 
-用户原始问题: {original_query}
-优化后的搜索查询: {optimized_query}
+    def _query_lightrag_standard(self, query: str, mode: str) -> dict:
+        """标准LightRAG查询API"""
+        url = f"{self.valves.LIGHTRAG_BASE_URL}/query"
+        payload = {
+            "query": query,
+            "mode": mode
+        }
 
-搜索结果:
-{search_results}"""
+        headers = {"Content-Type": "application/json"}
 
-            if context_text.strip():
-                prompt_content += f"""
+        try:
+            response = requests.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=self.valves.LIGHTRAG_TIMEOUT
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            return {"error": f"查询失败: {str(e)}"}
 
-对话历史:
-{context_text}"""
+    def _query_lightrag_streaming(self, query: str, mode: str) -> Generator[str, None, None]:
+        """流式LightRAG查询API"""
+        url = f"{self.valves.LIGHTRAG_BASE_URL}/query/stream"
 
-            prompt_content += """
+        payload = {
+            "query": query,
+            "mode": mode
+        }
 
-请遵循以下要求：
-1. 结合对话历史和搜索结果，提供准确、详细且有用的回答
-2. 如果搜索结果不足以完全回答问题，请说明并提供你能给出的最佳建议
-3. 引用相关的搜索结果来源，增强回答的可信度
-4. 保持回答的结构清晰，易于理解
-5. 如果发现搜索结果中有矛盾信息，请指出并分析
-6. 考虑对话上下文，确保回答的连贯性和相关性"""
+        headers = {"Content-Type": "application/json"}
 
-        answer_messages = [{
-            "role": "user",
-            "content": prompt_content
-        }]
+        try:
+            response = requests.post(
+                url,
+                json=payload,
+                headers=headers,
+                stream=True,
+                timeout=self.valves.LIGHTRAG_TIMEOUT
+            )
+            response.raise_for_status()
 
-        if stream:
-            return self._call_openai_api(answer_messages, stream=True)
-        else:
-            response = self._call_openai_api(answer_messages, stream=False)
-            return response['choices'][0]['message']['content']
+            for line in response.iter_lines():
+                if line:
+                    line_text = line.decode('utf-8').strip()
+                    if line_text:
+                        try:
+                            data = json.loads(line_text)
+                            if 'response' in data and data['response']:
+                                chunk = data['response']
+                                # 统计LightRAG流式输出token
+                                self._add_output_tokens(chunk)
+                                yield f'data: {json.dumps({"choices": [{"delta": {"content": chunk}}]})}\n\n'
+                            elif 'error' in data:
+                                error_msg = data['error']
+                                yield f'data: {json.dumps({"choices": [{"delta": {"content": f"错误: {error_msg}"}}]})}\n\n'
+                        except json.JSONDecodeError:
+                            continue
+
+        except Exception as e:
+            error_msg = f"LightRAG流式查询失败: {str(e)}"
+            yield f'data: {json.dumps({"choices": [{"delta": {"content": error_msg}}]})}\n\n'
+
+        yield "data: [DONE]\n\n"
 
     def pipe(
         self, user_message: str, model_id: str, messages: List[dict], body: dict
     ) -> Union[str, Generator, Iterator]:
         """
-        处理用户查询的主要方法
+        处理用户查询的主要方法 - 4阶段pipeline
 
         Args:
             user_message: 用户输入的消息
-            model_id: 模型ID（在此pipeline中未使用，但保留以兼容接口）
-            messages: 消息历史（在此pipeline中未使用，但保留以兼容接口）
+            model_id: 模型ID
+            messages: 消息历史
             body: 请求体，包含流式设置和用户信息
 
         Returns:
@@ -594,7 +696,7 @@ class Pipeline:
             return self._non_stream_response(user_message, messages)
 
     def _stream_response(self, query: str, messages: List[dict]) -> Generator[str, None, None]:
-        """流式响应处理"""
+        """流式响应处理 - 4阶段pipeline"""
         try:
             # 流式开始消息
             yield f'data: {json.dumps({"choices": [{"delta": {}, "finish_reason": None}]})}\n\n'
@@ -603,7 +705,7 @@ class Pipeline:
             optimize_msg = {
                 'choices': [{
                     'delta': {
-                        'content': "**🔧 问题优化阶段**\n正在优化查询问题..."
+                        'content': "**🔧 第一阶段：问题优化**\n正在优化查询问题..."
                     },
                     'finish_reason': None
                 }]
@@ -626,7 +728,7 @@ class Pipeline:
             search_msg = {
                 'choices': [{
                     'delta': {
-                        'content': "\n**🔍 搜索阶段**\n正在搜索相关信息..."
+                        'content': "\n**🔍 第二阶段：网络搜索**\n正在搜索相关信息..."
                     },
                     'finish_reason': None
                 }]
@@ -645,40 +747,49 @@ class Pipeline:
             }
             yield f"data: {json.dumps(search_result_msg)}\n\n"
 
-            # 第三阶段：生成回答
-            answer_start_msg = {
+            # 第三阶段：生成LightRAG查询
+            lightrag_gen_msg = {
                 'choices': [{
                     'delta': {
-                        'content': "\n**💭 回答阶段**\n"
+                        'content': "\n**🧠 第三阶段：生成LightRAG查询**\n正在分析搜索结果并生成增强查询..."
                     },
                     'finish_reason': None
                 }]
             }
-            yield f"data: {json.dumps(answer_start_msg)}\n\n"
+            yield f"data: {json.dumps(lightrag_gen_msg)}\n\n"
 
-            # 流式生成回答
+            lightrag_query = self._stage3_generate_lightrag_query(query, search_results, messages)
+
+            lightrag_gen_result_msg = {
+                'choices': [{
+                    'delta': {
+                        'content': f"\n✅ LightRAG查询生成完成\n增强查询: {lightrag_query[:100]}{'...' if len(lightrag_query) > 100 else ''}\n"
+                    },
+                    'finish_reason': None
+                }]
+            }
+            yield f"data: {json.dumps(lightrag_gen_result_msg)}\n\n"
+
+            # 第四阶段：LightRAG问答
+            lightrag_answer_msg = {
+                'choices': [{
+                    'delta': {
+                        'content': "\n**💭 第四阶段：LightRAG问答**\n"
+                    },
+                    'finish_reason': None
+                }]
+            }
+            yield f"data: {json.dumps(lightrag_answer_msg)}\n\n"
+
+            # 流式生成LightRAG回答
             try:
-                for chunk in self._stage3_answer(query, optimized_query, search_results, search_links, messages, stream=True):
-                    if 'choices' in chunk and len(chunk['choices']) > 0:
-                        delta = chunk['choices'][0].get('delta', {})
-                        if 'content' in delta:
-                            content_msg = {
-                                'choices': [{
-                                    'delta': {
-                                        'content': delta['content']
-                                    },
-                                    'finish_reason': chunk['choices'][0].get('finish_reason')
-                                }]
-                            }
-                            yield f"data: {json.dumps(content_msg)}\n\n"
-
-                            if chunk['choices'][0].get('finish_reason') == 'stop':
-                                break
+                for chunk_data in self._stage4_query_lightrag(lightrag_query, stream=True):
+                    yield chunk_data
             except Exception as e:
                 error_msg = {
                     'choices': [{
                         'delta': {
-                            'content': f"\n❌ 回答生成失败: {str(e)}"
+                            'content': f"\n❌ LightRAG查询失败: {str(e)}"
                         },
                         'finish_reason': None
                     }]
@@ -697,9 +808,6 @@ class Pipeline:
             }
             yield f"data: {json.dumps(token_info_msg)}\n\n"
 
-            # 流式结束消息
-            yield f'data: {json.dumps({"choices": [{"delta": {}, "finish_reason": "stop"}]})}\n\n'
-
         except Exception as e:
             error_msg = f"❌ Pipeline执行失败: {str(e)}"
             if self.valves.DEBUG_MODE:
@@ -709,7 +817,7 @@ class Pipeline:
         yield "data: [DONE]\n\n"
 
     def _non_stream_response(self, query: str, messages: List[dict]) -> str:
-        """非流式响应处理"""
+        """非流式响应处理 - 4阶段pipeline"""
         try:
             # 第一阶段：问题优化
             optimized_query = self._stage1_optimize_query(query, messages)
@@ -717,33 +825,37 @@ class Pipeline:
             # 第二阶段：搜索
             search_results, search_status, search_links = self._stage2_search(optimized_query)
 
-            # 第三阶段：生成回答
-            final_answer = self._stage3_answer(query, optimized_query, search_results, search_links, messages, stream=False)
+            # 第三阶段：生成LightRAG查询
+            lightrag_query = self._stage3_generate_lightrag_query(query, search_results, messages)
+
+            # 第四阶段：LightRAG问答
+            final_answer = self._stage4_query_lightrag(lightrag_query, stream=False)
 
             # 构建完整响应
             response_parts = []
-            response_parts.append(f"**� 问题优化**\n原始问题: {query}\n优化后查询: {optimized_query}")
-            response_parts.append(f"\n**�🔍 搜索结果**\n{search_status}")
+            response_parts.append(f"**🔧 第一阶段：问题优化**\n原始问题: {query}\n优化后查询: {optimized_query}")
+            response_parts.append(f"\n**🔍 第二阶段：网络搜索**\n{search_status}")
 
             if search_results and "搜索错误" not in search_results:
-                # 只显示搜索结果的摘要，不显示完整内容
+                # 显示搜索结果摘要
                 lines = search_results.split('\n')
                 summary_lines = []
-                for line in lines[:10]:  # 只显示前10行
+                for line in lines[:8]:  # 只显示前8行
                     if line.strip():
                         summary_lines.append(line)
-                if len(lines) > 10:
+                if len(lines) > 8:
                     summary_lines.append("...")
                 response_parts.append(f"\n搜索摘要:\n" + "\n".join(summary_lines))
 
-            response_parts.append(f"\n**💭 AI回答**\n{final_answer}")
+            response_parts.append(f"\n**🧠 第三阶段：LightRAG查询生成**\n增强查询: {lightrag_query[:150]}{'...' if len(lightrag_query) > 150 else ''}")
+            response_parts.append(f"\n**💭 第四阶段：LightRAG问答**\n{final_answer}")
 
             # 添加token统计信息
             token_stats = self._get_token_stats()
             token_info = f"\n\n---\n**Token消耗统计**\n- 输入Token: {token_stats['input_tokens']:,}\n- 输出Token: {token_stats['output_tokens']:,}\n- 总Token: {token_stats['total_tokens']:,}"
 
             # 添加配置信息
-            config_info = f"\n\n**配置信息**\n- 搜索结果数量: {self.valves.BOCHA_SEARCH_COUNT}\n- 时间范围: {self.valves.BOCHA_FRESHNESS}\n- 模型: {self.valves.OPENAI_MODEL}"
+            config_info = f"\n\n**配置信息**\n- 搜索结果数量: {self.valves.BOCHA_SEARCH_COUNT}\n- LightRAG模式: {self.valves.LIGHTRAG_DEFAULT_MODE}\n- 模型: {self.valves.OPENAI_MODEL}"
 
             return "\n".join(response_parts) + token_info + config_info
 

@@ -6,8 +6,8 @@ version: 2.0
 license: MIT
 description: A 3-stage pipeline: 1) LLM query optimization, 2) Web search using Bocha API, 3) AI-enhanced Q&A with OpenAI API
 requirements: requests, pydantic
-"""
-
+""" 
+ 
 import os
 import json
 import requests
@@ -491,7 +491,7 @@ class Pipeline:
         context_text = ""
         if messages and len(messages) > 1:
             # 获取最近的几轮对话作为上下文
-            recent_messages = messages[-4:]  # 最多取最近2轮对话
+            recent_messages = messages[-6:]  # 默认3轮对话（6条消息）
             for msg in recent_messages:
                 role = msg.get("role", "")
                 content = msg.get("content", "")

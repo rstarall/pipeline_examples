@@ -70,6 +70,12 @@ class Pipeline:
             description="默认用户ID"
         )
 
+        # 知识库配置
+        KNOWLEDGE_BASES: str = Field(
+            default='[{"name": "default_kb", "description": "默认知识库"}]',
+            description="知识库配置，JSON格式数组，包含name和description字段"
+        )
+
         # 请求超时配置
         REQUEST_TIMEOUT: int = Field(
             default=300,
@@ -91,7 +97,7 @@ class Pipeline:
     def __init__(self):
         """初始化Pipeline"""
         self.id = "intent_pipeline"
-        self.name = "Intent Recognition Pipeline"
+        self.name = "Intent Workflow Agent Pipeline"
         self.description = "基于意图识别的智能问答Pipeline，支持workflow和agent两种模式"
 
         # 初始化配置参数
@@ -104,6 +110,9 @@ class Pipeline:
 
         # 构建API端点URL
         self._build_api_urls()
+        
+        # 验证和解析知识库配置
+        self._validate_knowledge_bases()
 
     def _build_api_urls(self) -> None:
         """构建API端点URL"""
@@ -301,6 +310,7 @@ class Pipeline:
             yield from self._send_message_and_stream(
                 conversation_id=conversation_id,
                 user_message=user_message,
+                messages=messages,
                 user_id=user_id,
                 mode=mode,
                 user_token=user_token,
@@ -417,7 +427,8 @@ class Pipeline:
             # 构建请求数据
             request_data = {
                 "user_id": user_id,
-                "mode": mode
+                "mode": mode,
+                "knowledge_bases": self._parsed_knowledge_bases
             }
             
             # 如果提供了conversation_id，添加到请求数据中
@@ -455,6 +466,7 @@ class Pipeline:
         self,
         conversation_id: str,
         user_message: str,
+        messages: List[dict],
         user_id: str,
         mode: str = None,
         user_token: str = None,
@@ -466,6 +478,7 @@ class Pipeline:
         Args:
             conversation_id: 对话ID
             user_message: 用户消息
+            messages: 历史对话消息列表
             user_id: 用户ID
             mode: 执行模式
             user_token: 用户认证token
@@ -485,12 +498,16 @@ class Pipeline:
             request_data = {
                 "conversation_id": conversation_id,
                 "message": user_message,
+                "messages": messages,  # 添加历史对话信息
                 "user_id": user_id
             }
             
             # 添加mode参数（如果提供）
             if mode:
                 request_data["mode"] = mode
+            
+            # 添加知识库配置
+            request_data["knowledge_bases"] = self._parsed_knowledge_bases
             
             # 添加metadata以改善处理
             request_data["metadata"] = {
@@ -510,6 +527,7 @@ class Pipeline:
             if self.valves.DEBUG_MODE:
                 print(f"发送请求到: {stream_url}")
                 print(f"请求数据: {request_data}")
+                print(f"知识库配置: {self._parsed_knowledge_bases}")
 
             # 发送流式请求
             response = requests.post(
@@ -760,6 +778,29 @@ class Pipeline:
         """
         yield f"\n❌ 错误: {error_msg}\n"
 
+    def _validate_knowledge_bases(self) -> None:
+        """验证知识库配置格式"""
+        try:
+            knowledge_bases = json.loads(self.valves.KNOWLEDGE_BASES)
+            if not isinstance(knowledge_bases, list):
+                raise ValueError("知识库配置必须是数组格式")
+            
+            for kb in knowledge_bases:
+                if not isinstance(kb, dict) or 'name' not in kb or 'description' not in kb:
+                    raise ValueError("知识库配置项必须包含name和description字段")
+                    
+            # 存储解析后的知识库配置
+            self._parsed_knowledge_bases = knowledge_bases
+            
+            if self.valves.DEBUG_MODE:
+                print(f"知识库配置验证成功: {self._parsed_knowledge_bases}")
+                
+        except (json.JSONDecodeError, ValueError) as e:
+            error_msg = f"知识库配置格式错误: {str(e)}"
+            print(f"警告: {error_msg}")
+            # 使用默认配置
+            self._parsed_knowledge_bases = [{"name": "default_kb", "description": "默认知识库"}]
+
 
 # 示例使用方法（可选）
 if __name__ == "__main__":
@@ -769,6 +810,10 @@ if __name__ == "__main__":
 
     # 创建Pipeline实例
     pipeline = Pipeline()
+    
+    # 可选：自定义知识库配置
+    # pipeline.valves.KNOWLEDGE_BASES = '[{"name": "ai_history", "description": "人工智能历史知识库"}, {"name": "tech_docs", "description": "技术文档知识库"}]'
+    # pipeline._validate_knowledge_bases()  # 重新验证配置
 
     # 示例消息
     test_messages = [
