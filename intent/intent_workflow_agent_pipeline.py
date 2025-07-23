@@ -10,7 +10,7 @@ import os
 import asyncio
 import requests
 import uuid
-from typing import List, Dict, Any, Union, Generator, Iterator, Optional, Callable
+from typing import List, Dict, Any, Union, Generator, Iterator,Literal, Optional, Callable
 from pydantic import BaseModel, Field
 
 # 常量定义
@@ -65,8 +65,8 @@ class Pipeline:
         )
 
         # 默认执行模式
-        DEFAULT_MODE: str = Field(
-            default=WORKFLOW_MODE,
+        DEFAULT_MODE: Literal["workflow", "agent"] = Field(
+            default="workflow",
             description="默认执行模式 (workflow/agent)"
         )
 
@@ -78,7 +78,7 @@ class Pipeline:
 
         # 知识库配置
         KNOWLEDGE_BASES: str = Field(
-            default='[{"name": "default_kb", "description": "默认知识库"}]',
+            default='[{"name": "test", "description": "默认知识库"}]',
             description="知识库配置，JSON格式数组，包含name和description字段"
         )
 
@@ -110,6 +110,9 @@ class Pipeline:
         self.valves = self.Valves(
             **{k: os.getenv(k, v.default) for k, v in self.Valves.model_fields.items()}
         )
+        
+        # 检查是否有外部传入的知识库配置
+        # 用户可以通过UI配置知识库
 
         # 对话会话缓存
         self._conversation_cache: Dict[str, str] = {}
@@ -128,13 +131,10 @@ class Pipeline:
 
     async def on_startup(self):
         """Pipeline启动时调用"""
-        print(f"on_startup: {__name__}")
-        if self.valves.DEBUG_MODE:
-            print(f"Pipeline配置: {self.valves.model_dump()}")
+        pass
 
     async def on_shutdown(self):
         """Pipeline关闭时调用"""
-        print(f"on_shutdown: {__name__}")
         # 清理对话缓存
         self._conversation_cache.clear()
 
@@ -185,16 +185,10 @@ class Pipeline:
 
         # 生成缓存键 - 使用chat_id作为主键
         cache_key = f"{user_id}_{chat_id}_{mode}"
-
-        # 调试输出
-        if self.valves.DEBUG_MODE:
-            print("=" * 50)
-            print(f"会话ID: {chat_id}")
-            print(f"Session ID: {session_id}")
-            print(f"用户ID: {user_id}")
-            print(f"是否临时会话: {is_temporary}")
-            print(f"缓存键: {cache_key}")
-            print("=" * 50)
+        
+        # 每次调用都动态解析KNOWLEDGE_BASES配置
+        self._validate_knowledge_bases()
+        actual_knowledge_bases = self._parsed_knowledge_bases
 
         try:
             # 异步处理流式响应
@@ -207,12 +201,11 @@ class Pipeline:
                 chat_id=chat_id,
                 is_temporary=is_temporary,
                 user_token=user_token,
+                knowledge_bases=actual_knowledge_bases,
                 __event_emitter__= __event_emitter__
             )
         except Exception as e:
             error_msg = f"Pipeline处理失败: {str(e)}"
-            if self.valves.DEBUG_MODE:
-                print(f"Error in pipe: {error_msg}")
             return self._create_error_response(error_msg)
 
     def _get_session_info(self, body: dict) -> dict:
@@ -269,6 +262,7 @@ class Pipeline:
         chat_id: str,
         is_temporary: bool,
         user_token: str = None,
+        knowledge_bases: List[Dict[str, str]] = None,
         __event_emitter__= None
     ) -> Generator[str, None, None]:
         """
@@ -305,6 +299,7 @@ class Pipeline:
                 chat_id=chat_id,
                 is_temporary=is_temporary,
                 user_token=user_token,
+                knowledge_bases=knowledge_bases,
                 __event_emitter__=__event_emitter__
             )
 
@@ -320,13 +315,12 @@ class Pipeline:
                 user_id=user_id,
                 mode=mode,
                 user_token=user_token,
+                knowledge_bases=knowledge_bases,
                 __event_emitter__=__event_emitter__
             )
 
         except Exception as e:
             error_msg = f"流式处理错误: {str(e)}"
-            if self.valves.DEBUG_MODE:
-                print(f"Stream processing error: {error_msg}")
 
             yield from self._emit_status(
                 __event_emitter__,
@@ -342,6 +336,7 @@ class Pipeline:
         chat_id: str,
         is_temporary: bool,
         user_token: str = None,
+        knowledge_bases: List[Dict[str, str]] = None,
         __event_emitter__=None
     ) -> Optional[str]:
         """
@@ -372,15 +367,11 @@ class Pipeline:
                 # 如果没有缓存，直接使用前台传入的会话ID
                 conversation_id = chat_id
                 self._conversation_cache[cache_key] = conversation_id
-                if self.valves.DEBUG_MODE:
-                    print(f"使用前台传入的会话ID: {conversation_id}")
                 return conversation_id
 
             # 对于临时会话或没有传入会话ID的情况，检查缓存
             if cache_key in self._conversation_cache:
                 conversation_id = self._conversation_cache[cache_key]
-                if self.valves.DEBUG_MODE:
-                    print(f"使用缓存的对话ID: {conversation_id}")
                 return conversation_id
 
             # 发送创建对话状态
@@ -394,7 +385,8 @@ class Pipeline:
                 user_id=user_id,
                 mode=mode,
                 conversation_id=chat_id if not is_temporary else None,
-                user_token=user_token
+                user_token=user_token,
+                knowledge_bases=knowledge_bases
             )
 
             if conversation_id:
@@ -406,8 +398,6 @@ class Pipeline:
             return conversation_id
 
         except Exception as e:
-            if self.valves.DEBUG_MODE:
-                print(f"获取或创建对话失败: {str(e)}")
             return None
 
     def _create_new_conversation(
@@ -415,7 +405,8 @@ class Pipeline:
         user_id: str,
         mode: str,
         conversation_id: str = None,
-        user_token: str = None
+        user_token: str = None,
+        knowledge_bases: List[Dict[str, str]] = None
     ) -> Optional[str]:
         """
         创建新对话会话
@@ -434,7 +425,7 @@ class Pipeline:
             request_data = {
                 "user_id": user_id,
                 "mode": mode,
-                "knowledge_bases": self._parsed_knowledge_bases
+                "knowledge_bases": knowledge_bases if knowledge_bases else self._parsed_knowledge_bases
             }
             
             # 如果提供了conversation_id，添加到请求数据中
@@ -467,8 +458,6 @@ class Pipeline:
             return None
 
         except Exception as e:
-            if self.valves.DEBUG_MODE:
-                print(f"创建对话请求失败: {str(e)}")
             return None
 
     def _send_message_and_stream(
@@ -479,6 +468,7 @@ class Pipeline:
         user_id: str,
         mode: str = None,
         user_token: str = None,
+        knowledge_bases: List[Dict[str, str]] = None,
         __event_emitter__=None
     ) -> Generator[str, None, None]:
         """
@@ -516,7 +506,7 @@ class Pipeline:
                 request_data["mode"] = mode
             
             # 添加知识库配置
-            request_data["knowledge_bases"] = self._parsed_knowledge_bases
+            request_data["knowledge_bases"] = knowledge_bases if knowledge_bases else self._parsed_knowledge_bases
             
             # 添加知识库API URL
             request_data["knowledge_api_url"] = self.valves.KNOWLEDGE_API_URL
@@ -536,10 +526,6 @@ class Pipeline:
             # 构建流式聊天URL
             stream_url = self.stream_chat_url.format(conversation_id)
 
-            if self.valves.DEBUG_MODE:
-                print(f"发送请求到: {stream_url}")
-                print(f"请求数据: {request_data}")
-                print(f"知识库配置: {self._parsed_knowledge_bases}")
 
             # 发送流式请求
             response = requests.post(
@@ -575,14 +561,10 @@ class Pipeline:
 
         except requests.exceptions.RequestException as e:
             error_msg = f"请求错误: {str(e)}"
-            if self.valves.DEBUG_MODE:
-                print(f"Request error: {error_msg}")
             yield from self._create_error_response(error_msg)
 
         except Exception as e:
             error_msg = f"发送消息失败: {str(e)}"
-            if self.valves.DEBUG_MODE:
-                print(f"Send message error: {error_msg}")
             yield from self._create_error_response(error_msg)
 
     def _process_stream_lines(
@@ -622,8 +604,6 @@ class Pipeline:
                         data = json.loads(data_content)
                         yield from self._handle_stream_data(data, __event_emitter__)
                     except json.JSONDecodeError:
-                        if self.valves.DEBUG_MODE:
-                            print(f"JSON解析失败: {data_content}")
                         continue
                         
                 # 处理非SSE格式的直接内容（兼容性处理）
@@ -633,14 +613,10 @@ class Pipeline:
                         yield from self._handle_stream_data(data, __event_emitter__)
                     except json.JSONDecodeError:
                         # 如果不是JSON，可能是纯文本内容，直接输出
-                        if self.valves.DEBUG_MODE:
-                            print(f"接收到非JSON内容: {line}")
                         yield line.strip()
 
         except Exception as e:
             error_msg = f"处理流式数据失败: {str(e)}"
-            if self.valves.DEBUG_MODE:
-                print(f"Stream processing error: {error_msg}")
             yield from self._create_error_response(error_msg)
 
     def _handle_stream_data(
@@ -699,9 +675,8 @@ class Pipeline:
                 yield from self._create_error_response(error_msg)
 
             else:
-                # 其他类型 - 调试输出并尝试作为内容处理
-                if self.valves.DEBUG_MODE:
-                    print(f"未知数据类型: {data_type}, 数据: {data}")
+                # 其他类型 - 尝试作为内容处理
+                pass
                 
                 # 尝试查找可能的内容字段
                 possible_content_fields = ["content", "message", "text", "response", "answer"]
@@ -711,8 +686,6 @@ class Pipeline:
                         break
 
         except Exception as e:
-            if self.valves.DEBUG_MODE:
-                print(f"处理流式数据项失败: {str(e)}")
             # 如果处理失败，尝试输出原始数据
             if isinstance(data, dict):
                 for key, value in data.items():
@@ -755,8 +728,7 @@ class Pipeline:
                 loop.close()
 
             except Exception as e:
-                if self.valves.DEBUG_MODE:
-                    print(f"发送状态事件失败: {str(e)}")
+                pass
 
         # 返回空生成器以保持一致性
         if False:  # 永远不会执行，但使函数成为生成器
@@ -794,6 +766,7 @@ class Pipeline:
         """验证知识库配置格式"""
         try:
             knowledge_bases = json.loads(self.valves.KNOWLEDGE_BASES)
+            
             if not isinstance(knowledge_bases, list):
                 raise ValueError("知识库配置必须是数组格式")
             
@@ -803,106 +776,8 @@ class Pipeline:
                     
             # 存储解析后的知识库配置
             self._parsed_knowledge_bases = knowledge_bases
-            
-            if self.valves.DEBUG_MODE:
-                print(f"知识库配置验证成功: {self._parsed_knowledge_bases}")
                 
         except (json.JSONDecodeError, ValueError) as e:
-            error_msg = f"知识库配置格式错误: {str(e)}"
-            print(f"警告: {error_msg}")
             # 使用默认配置
-            self._parsed_knowledge_bases = [{"name": "default_kb", "description": "默认知识库"}]
+            self._parsed_knowledge_bases = [{"name": "test", "description": "默认知识库"}]
 
-
-# 示例使用方法（可选）
-if __name__ == "__main__":
-    """
-    Pipeline使用示例
-    """
-
-    # 创建Pipeline实例
-    pipeline = Pipeline()
-    
-    # 可选：自定义知识库配置
-    # pipeline.valves.KNOWLEDGE_BASES = '[{"name": "ai_history", "description": "人工智能历史知识库"}, {"name": "tech_docs", "description": "技术文档知识库"}]'
-    # pipeline._validate_knowledge_bases()  # 重新验证配置
-
-    # 可选：自定义知识库API URL
-    # pipeline.valves.KNOWLEDGE_API_URL = "http://your-custom-knowledge-api:3000"
-
-    # 示例消息
-    test_messages = [
-        {"role": "user", "content": "你好，请介绍一下人工智能的发展历史"}
-    ]
-
-    # 示例请求体
-    test_body = {
-        "mode": "workflow",  # 或 "agent"
-        "user_id": "test_user",
-        "chat_id": "test_chat_123",  # 前台传入的会话ID
-        "metadata": {
-            "session_id": "test_session_456"  # 可选的会话ID
-        },
-        "user": {
-            "id": "test_user",
-            "name": "Test User",
-            "email": "test@example.com"
-        }
-    }
-
-    print("Intent Pipeline 测试示例")
-    print("=" * 50)
-    print(f"消息: {test_messages[-1]['content']}")
-    print(f"模式: {test_body['mode']}")
-    print(f"用户ID: {test_body['user_id']}")
-    print(f"会话ID: {test_body['chat_id']}")
-    print("=" * 50)
-
-    try:
-        # 步骤1: 先创建会话
-        print("步骤1: 创建会话...")
-        conversation_id = pipeline._create_new_conversation(
-            user_id=test_body['user_id'],
-            mode=test_body['mode'],
-            conversation_id=test_body['chat_id']
-        )
-        
-        if not conversation_id:
-            print("❌ 创建会话失败")
-            exit(1)
-            
-        print(f"✅ 会话创建成功，conversation_id: {conversation_id}")
-        
-        # 更新test_body中的conversation_id
-        test_body['conversation_id'] = conversation_id
-        
-        print("=" * 50)
-        print("步骤2: 开始聊天...")
-        
-        # 步骤2: 调用pipeline进行聊天
-        response_generator = pipeline.pipe(
-            user_message=test_messages[-1]['content'],
-            model_id="intent-model",
-            messages=test_messages,
-            body=test_body
-        )
-
-        # 处理响应
-        print("响应:")
-        for response in response_generator:
-            if isinstance(response, str):
-                print(response, end="")
-
-        print("\n" + "=" * 50)
-        print("测试完成")
-
-    except Exception as e:
-        print(f"测试失败: {str(e)}")
-
-    finally:
-        # 清理
-        import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(pipeline.on_shutdown())
-        loop.close()
