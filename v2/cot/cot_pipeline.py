@@ -878,6 +878,124 @@ class Pipeline:
             else:
                 return error_msg
 
+    def _generate_thinking_details(self, content: str, done: bool = False, duration: float = None) -> str:
+        """生成思考内容的 details 标签
+        
+        实现说明：
+        - 流式输出时，每次推送完整的 <details> 块，内容逐步丰富
+        - done=false 表示思考进行中，done=true 表示思考完成
+        - 思考完成时会包含 duration 属性，显示思考耗时
+        - 前端会自动用最新的 details 块覆盖渲染
+        
+        Args:
+            content: 思考内容文本
+            done: 是否思考完成
+            duration: 思考耗时（秒）
+            
+        Returns:
+            格式化的 details HTML 标签
+        """
+        done_attr = 'true' if done else 'false'
+        duration_attr = f' duration="{int(duration)}"' if duration is not None else ''
+        summary_text = f'Thought for {int(duration)} seconds' if done and duration else 'Thinking…'
+        
+        return f'''<details type="reasoning" done="{done_attr}"{duration_attr}>
+    <summary>{summary_text}</summary>
+    <p>{content}</p>
+</details>'''
+
+    def _stream_thinking_with_details(self, user_message: str, messages: List[dict]) -> Generator:
+        """流式生成思考内容，每次输出完整的details块"""
+        if not self.valves.OPENAI_API_KEY:
+            yield "错误: 未设置OpenAI API密钥"
+            return
+
+        strategy = self._get_strategy()
+        
+        system_prompt = """你是一个专业的AI助手。现在需要对用户的问题进行深度思考。请展现你的思维过程，使用自然流畅的书面语言。
+
+思考要求：
+- 使用专业的书面语言，避免口语化表达
+- 思考过程要自然连贯，如同专业人士内心的思维流淌
+- 针对具体问题深入思考，包含实质性的分析内容
+- 思考过程中不要出现总结或结论部分
+- 让思维自然展开，体现真实的推理过程
+
+请开始你的深度思考："""
+
+        # 使用历史上下文管理器生成提示
+        user_prompt = HistoryContextManager.format_thinking_prompt(
+            query=user_message,
+            messages=messages or [],
+            strategy=strategy,
+            max_turns=self.valves.HISTORY_TURNS
+        )
+
+        url = f"{self.valves.OPENAI_BASE_URL}/chat/completions"
+        
+        headers = {
+            "Authorization": f"Bearer {self.valves.OPENAI_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": self.valves.OPENAI_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "max_tokens": self.valves.MAX_THINKING_TOKENS,
+            "temperature": self.valves.THINKING_TEMPERATURE,
+            "stream": True
+        }
+        
+        # 添加输入token统计
+        self._add_thinking_tokens(system_prompt)
+        self._add_thinking_tokens(user_prompt)
+        
+        if self.valves.DEBUG_MODE:
+            print(f"🤔 生成思维过程 - 策略: {strategy.value}")
+            print(f"   模型: {self.valves.OPENAI_MODEL}")
+            print(f"   温度: {self.valves.THINKING_TEMPERATURE}")
+        
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                json=payload,
+                stream=True,
+                timeout=self.valves.OPENAI_TIMEOUT
+            )
+            response.raise_for_status()
+            
+            collected_content = ""
+            
+            for line in response.iter_lines():
+                if line:
+                    line = line.decode('utf-8')
+                    if line.startswith('data: '):
+                        data = line[6:]
+                        if data == '[DONE]':
+                            break
+                        try:
+                            json_data = json.loads(data)
+                            delta = json_data.get('choices', [{}])[0].get('delta', {}).get('content', '')
+                            if delta:
+                                collected_content += delta
+                                self._add_thinking_tokens(delta)
+                                yield collected_content  # 返回累积的内容
+                        except json.JSONDecodeError:
+                            pass
+            
+            if self.valves.DEBUG_MODE:
+                print(f"✅ 思维过程流式生成完成，总长度: {len(collected_content)}")
+                
+        except Exception as e:
+            error_msg = f"思维链生成错误: {str(e)}"
+            if self.valves.DEBUG_MODE:
+                print(f"❌ {error_msg}")
+            yield error_msg
+
     def _stream_openai_response(self, url, headers, payload, is_thinking=False):
         """流式处理OpenAI响应"""
         try:
@@ -940,22 +1058,39 @@ class Pipeline:
         strategy = self._get_strategy()
         
         # 阶段1：生成思维链推理过程
-        yield f"🤔 **思维过程**: 正在深入思考...\n\n"
-        
         stream_mode = body.get("stream", False) and self.valves.ENABLE_STREAMING
         thinking_content = ""
+        
+        # 开始计时
+        thinking_start_time = time.time()
         
         try:
             if stream_mode:
                 # 流式模式 - 思维过程
-                for chunk in self._stage1_thinking(user_message, messages, stream=True):
-                    thinking_content += chunk
-                    yield chunk
+                # 先推送初始的 details 标签
+                yield self._generate_thinking_details("正在分析...", done=False)
+                
+                for content in self._stream_thinking_with_details(user_message, messages):
+                    thinking_content = content
+                    # 每次推送完整的 details 块
+                    yield self._generate_thinking_details(thinking_content, done=False)
+                    
+                # 计算思考时长
+                thinking_duration = time.time() - thinking_start_time
+                # 推送最终的带时长的 details 块
+                yield self._generate_thinking_details(thinking_content, done=True, duration=thinking_duration)
             else:
                 # 非流式模式 - 思维过程
+                # 先推送初始的 details 标签
+                yield self._generate_thinking_details("正在分析...", done=False)
+                
                 thinking_result = self._stage1_thinking(user_message, messages, stream=False)
                 thinking_content = thinking_result
-                yield thinking_result
+                
+                # 计算思考时长
+                thinking_duration = time.time() - thinking_start_time
+                # 推送最终的带时长的 details 块
+                yield self._generate_thinking_details(thinking_content, done=True, duration=thinking_duration)
                 
         except Exception as e:
             error_msg = f"❌ 思维过程生成错误: {str(e)}"
