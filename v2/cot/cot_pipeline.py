@@ -865,20 +865,10 @@ class Pipeline:
                 print(f"❌ {error_msg}")
             return error_msg
 
-
-
-
-
-    async def _stream_thinking_with_events(self, user_message: str, messages: List[dict], event_emitter) -> AsyncGenerator:
-        """使用事件系统流式生成思考内容 - 修复版本"""
+    def _stream_thinking(self, query: str, messages: List[dict]) -> Generator[str, None, None]:
+        """流式生成思维过程"""
         if not self.valves.OPENAI_API_KEY:
-            await event_emitter({
-                "type": "notification",
-                "data": {
-                    "type": "error",
-                    "content": "错误: 未设置OpenAI API密钥"
-                }
-            })
+            yield "错误: 未设置OpenAI API密钥"
             return
 
         strategy = self._get_strategy()
@@ -896,7 +886,7 @@ class Pipeline:
 
         # 使用历史上下文管理器生成提示
         user_prompt = HistoryContextManager.format_thinking_prompt(
-            query=user_message,
+            query=query,
             messages=messages or [],
             strategy=strategy,
             max_turns=self.valves.HISTORY_TURNS
@@ -925,7 +915,7 @@ class Pipeline:
         self._add_thinking_tokens(user_prompt)
         
         if self.valves.DEBUG_MODE:
-            print(f"🤔 使用事件系统生成思维过程 - 策略: {strategy.value}")
+            print(f"🤔 流式生成思维过程 - 策略: {strategy.value}")
         
         try:
             response = requests.post(
@@ -949,55 +939,36 @@ class Pipeline:
                             delta = json_data.get('choices', [{}])[0].get('delta', {}).get('content', '')
                             if delta:
                                 self._add_thinking_tokens(delta)
-                                
-                                # 关键修复：使用正确的事件格式推送推理内容
-                                await event_emitter({
-                                    "type": "chat:message:delta",
-                                    "data": {
-                                        "choices": [{
-                                            "delta": {
-                                                "reasoning_content": delta  # 使用 reasoning_content 字段
-                                            }
-                                        }]
-                                    }
-                                })
-                                
-                                yield delta  # 返回 delta 用于累积内容
+                                yield delta
                         except json.JSONDecodeError:
                             pass
-            
-            if self.valves.DEBUG_MODE:
-                print(f"✅ 事件系统思维过程流式生成完成")
-                
+                            
         except Exception as e:
             error_msg = f"思维链生成错误: {str(e)}"
             if self.valves.DEBUG_MODE:
                 print(f"❌ {error_msg}")
-            await event_emitter({
-                "type": "notification",
-                "data": {
-                    "type": "error",
-                    "content": error_msg
-                }
-            })
+            yield error_msg
 
-    async def _stream_answer_with_events(self, user_message: str, thinking_content: str, messages: List[dict], event_emitter) -> AsyncGenerator:
-        """使用事件系统流式生成最终答案"""
+    def _stream_answer(self, query: str, thinking_content: str, messages: List[dict]) -> Generator[str, None, None]:
+        """流式生成最终答案"""
         if not self.valves.OPENAI_API_KEY:
-            await event_emitter({
-                "type": "notification",
-                "data": {
-                    "type": "error",
-                    "content": "错误: 未设置OpenAI API密钥"
-                }
-            })
+            yield "错误: 未设置OpenAI API密钥"
             return
 
-        system_prompt = """你是一个专业的AI助手，需要基于前述思维分析过程，为用户提供准确、实用的最终答案。"""
+        system_prompt = """你是一个专业的AI助手，需要基于前述思维分析过程，为用户提供准确、实用的最终答案。
+
+核心要求：
+1. 综合思维分析中的关键洞察和结论
+2. 提供结构清晰、逻辑严密的专业回答
+3. 确保答案准确性和实用价值，直接回应用户需求
+4. 适当提供具体的建议、方案或指导意见
+5. 保持客观立场，明确表达任何不确定性或局限性
+
+请使用专业、准确的中文表达，确保语言规范且易于理解。"""
 
         # 使用历史上下文管理器生成提示
         user_prompt = HistoryContextManager.format_answer_prompt(
-            query=user_message,
+            query=query,
             thinking_process=thinking_content,
             messages=messages or [],
             max_turns=self.valves.HISTORY_TURNS
@@ -1026,7 +997,7 @@ class Pipeline:
         self._add_answer_tokens(user_prompt)
         
         if self.valves.DEBUG_MODE:
-            print("📝 使用事件系统生成最终答案")
+            print("📝 流式生成最终答案")
         
         try:
             response = requests.post(
@@ -1050,41 +1021,17 @@ class Pipeline:
                             delta = json_data.get('choices', [{}])[0].get('delta', {}).get('content', '')
                             if delta:
                                 self._add_answer_tokens(delta)
-                                
-                                # 推送正常内容
-                                await event_emitter({
-                                    "type": "chat:message:delta",
-                                    "data": {
-                                        "choices": [{
-                                            "delta": {
-                                                "content": delta  # 使用普通 content 字段
-                                            }
-                                        }]
-                                    }
-                                })
-                                
                                 yield delta
                         except json.JSONDecodeError:
                             pass
-            
-            if self.valves.DEBUG_MODE:
-                print(f"✅ 事件系统答案流式生成完成")
-                
+                            
         except Exception as e:
             error_msg = f"答案生成错误: {str(e)}"
             if self.valves.DEBUG_MODE:
                 print(f"❌ {error_msg}")
-            await event_emitter({
-                "type": "notification",
-                "data": {
-                    "type": "error",
-                    "content": error_msg
-                }
-            })
+            yield error_msg
 
-
-
-    async def pipe(
+    def pipe(
         self, 
         user_message: str, 
         model_id: str, 
@@ -1093,12 +1040,8 @@ class Pipeline:
         __user__: dict = None,
         __event_emitter__ = None,
         __event_call__ = None
-    ) -> str:
-        """主管道函数，处理用户请求 - 仅支持事件系统"""
-        # 验证事件系统
-        if not __event_emitter__:
-            raise ValueError("此 Pipeline 需要事件系统支持，请确保 Open WebUI 版本支持 __event_emitter__")
-        
+    ) -> Union[str, Generator, Iterator]:
+        """主管道函数，处理用户请求 - 参考 langgraph 示例实现"""
         # 重置token统计
         self._reset_token_stats()
 
@@ -1109,125 +1052,114 @@ class Pipeline:
 
         # 验证输入
         if not user_message or not user_message.strip():
-            await __event_emitter__({
-                "type": "notification",
-                "data": {
-                    "type": "error",
-                    "content": "请输入有效的问题或查询内容"
-                }
-            })
             return "❌ 请输入有效的问题或查询内容"
 
-        strategy = self._get_strategy()
-        
-        # 阶段1：生成思维链推理过程
+        # 判断是否使用流式输出
         stream_mode = body.get("stream", False) and self.valves.ENABLE_STREAMING
+        
+        if stream_mode:
+            return self._generate_streaming_response_openai_format(user_message, messages)
+        else:
+            return self._generate_complete_response(user_message, messages)
+
+    def _generate_streaming_response_openai_format(self, user_message: str, messages: List[dict]) -> Generator[str, None, None]:
+        """生成符合 OpenAI 格式的流式响应 - 参考 langgraph_example.py"""
+        
+        # 流开始消息
+        stream_start_msg = {
+            'choices': [{
+                'delta': {}, 
+                'finish_reason': None
+            }]
+        }
+        yield f"data: {json.dumps(stream_start_msg)}\n\n"
+        
+        # 阶段1：流式生成思维过程
+        thinking_content = ""
+        for chunk in self._stream_thinking(user_message, messages):
+            thinking_content += chunk
+            
+            # 发送思考内容 - 使用 reasoning_content 字段
+            think_msg = {
+                'choices': [{
+                    'delta': {
+                        'reasoning_content': chunk,
+                    },
+                    'finish_reason': None
+                }]
+            }
+            yield f"data: {json.dumps(think_msg)}\n\n"
+        
+        # 阶段2：流式生成最终答案
+        for chunk in self._stream_answer(user_message, thinking_content, messages):
+            # 发送正常内容 - 使用 content 字段
+            normal_msg = {
+                'choices': [{
+                    'delta': {
+                        'content': chunk,
+                    },
+                    'finish_reason': None
+                }]
+            }
+            yield f"data: {json.dumps(normal_msg)}\n\n"
+        
+        # 流结束消息
+        stream_end_msg = {
+            'choices': [{
+                'delta': {}, 
+                'finish_reason': 'stop'
+            }]
+        }
+        yield f"data: {json.dumps(stream_end_msg)}\n\n"
+        
+        if self.valves.DEBUG_MODE:
+            stats = self._get_token_stats()
+            print(f"💹 Token统计: 思维({stats['thinking_tokens']}) + 答案({stats['answer_tokens']}) = 总计({stats['total_tokens']})")
+
+
+
+    def _generate_streaming_response(self, user_message: str, messages: List[dict]) -> Generator[str, None, None]:
+        """生成流式响应（回退方案）"""
+        # 阶段1：流式生成思维过程
         thinking_content = ""
         
-        # 开始计时
-        thinking_start_time = time.time()
+        yield "🤔 **思维过程**:\n\n"
         
-        try:
-            await __event_emitter__({
-                "type": "status",
-                "data": {
-                    "description": "开始深度思考分析...",
-                    "done": False,
-                    "hidden": False
-                }
-            })
+        for chunk in self._stream_thinking(user_message, messages):
+            thinking_content += chunk
+            yield chunk
+        
+        yield "\n\n📝 **最终答案**:\n\n"
+        
+        # 阶段2：流式生成最终答案
+        for chunk in self._stream_answer(user_message, thinking_content, messages):
+            yield chunk
             
-            if stream_mode:
-                # 流式推送推理内容
-                async for content_chunk in self._stream_thinking_with_events(user_message, messages, __event_emitter__):
-                    thinking_content += content_chunk
-            else:
-                # 非流式模式 - 先生成完整推理内容
-                thinking_result = self._stage1_thinking(user_message, messages)
-                thinking_content = thinking_result
-                
-                # 一次性推送完整推理内容
-                await __event_emitter__({
-                    "type": "chat:message:delta",
-                    "data": {
-                        "choices": [{
-                            "delta": {
-                                "reasoning_content": thinking_content
-                            }
-                        }]
-                    }
-                })
-                
-            # 计算思考时长并发送完成状态
-            thinking_duration = time.time() - thinking_start_time
-            await __event_emitter__({
-                "type": "status",
-                "data": {
-                    "description": f"思考完成，用时 {int(thinking_duration)} 秒",
-                    "done": True,
-                    "hidden": False
-                }
-            })
-                
-        except Exception as e:
-            error_msg = f"❌ 思维过程生成错误: {str(e)}"
-            if self.valves.DEBUG_MODE:
-                print(f"❌ {error_msg}")
-            await __event_emitter__({
-                "type": "notification",
-                "data": {
-                    "type": "error",
-                    "content": error_msg
-                }
-            })
-            return error_msg
-        
-        # 阶段2：基于思维链生成最终答案
-        await __event_emitter__({
-            "type": "status",
-            "data": {
-                "description": "生成最终答案...",
-                "done": False,
-                "hidden": False
-            }
-        })
-        
-        try:
-            if stream_mode:
-                # 使用事件系统的流式模式 - 最终答案
-                async for chunk in self._stream_answer_with_events(user_message, thinking_content, messages, __event_emitter__):
-                    pass  # 事件系统会自动处理输出
-            else:
-                # 非流式但有事件系统
-                result = self._stage2_answer(user_message, thinking_content, messages)
-                await __event_emitter__({
-                    "type": "chat:message",
-                    "data": {
-                        "content": result
-                    }
-                })
-                
-            # 完成状态
-            await __event_emitter__({
-                "type": "status",
-                "data": {
-                    "description": "回答完成",
-                    "done": True,
-                    "hidden": False
-                }
-            })
+        # 输出统计信息
+        if self.valves.DEBUG_MODE:
+            stats = self._get_token_stats()
+            yield f"\n\n---\n💹 Token统计: 思维({stats['thinking_tokens']}) + 答案({stats['answer_tokens']}) = 总计({stats['total_tokens']})"
 
-        except Exception as e:
-            error_msg = f"❌ 最终答案生成错误: {str(e)}"
-            if self.valves.DEBUG_MODE:
-                print(f"❌ {error_msg}")
-            await __event_emitter__({
-                "type": "notification",
-                "data": {
-                    "type": "error",
-                    "content": error_msg
-                }
-            })
-            return error_msg
+    def _generate_complete_response(self, user_message: str, messages: List[dict]) -> str:
+        """生成完整响应（回退方案）"""
+        # 阶段1：生成思维过程
+        thinking_content = self._stage1_thinking(user_message, messages)
+        
+        # 阶段2：生成最终答案
+        answer_content = self._stage2_answer(user_message, thinking_content, messages)
+        
+        # 组合完整响应
+        full_response = f"""🤔 **思维过程**:
 
-        return "✅ CoT 推理完成"
+{thinking_content}
+
+📝 **最终答案**:
+
+{answer_content}"""
+
+        # 添加统计信息（调试模式）
+        if self.valves.DEBUG_MODE:
+            stats = self._get_token_stats()
+            full_response += f"\n\n---\n💹 Token统计: 思维({stats['thinking_tokens']}) + 答案({stats['answer_tokens']}) = 总计({stats['total_tokens']})"
+        
+        return full_response
