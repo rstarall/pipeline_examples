@@ -23,9 +23,7 @@ WORKFLOW_MODE = "workflow"
 AGENT_MODE = "agent"
 
 # 响应类型常量
-STATUS_TYPE = "status"
 CONTENT_TYPE = "content"
-PROGRESS_TYPE = "progress"
 ERROR_TYPE = "error"
 
 # HTTP请求头
@@ -34,15 +32,27 @@ DEFAULT_HEADERS = {
     'Content-Type': 'application/json',
 }
 
-# 状态消息
-STATUS_MESSAGES = {
-    "initializing": "正在初始化对话...",
-    "creating_conversation": "正在创建对话会话...",
-    "sending_message": "正在发送消息...",
-    "processing": "正在处理您的问题...",
-    "streaming": "正在获取流式响应...",
-    "completed": "处理完成",
-    "error": "处理过程中出现错误"
+# 前端Pipeline内部状态定义
+FRONTEND_STATUSES = {
+    "initializing": "正在初始化对话系统...",
+    "creating_conversation": "正在创建对话会话...", 
+    "sending_message": "正在向后端服务发送消息...",
+    "streaming": "正在接收后端流式响应...",
+    "error": "处理发生错误",
+}
+
+# 后端WorkflowStage枚举阶段标题映射
+STAGE_TITLES = {
+    "initialization": "系统初始化",
+    "expanding_question": "问题扩写与优化",
+    "analyzing_question": "问题分析与规划", 
+    "task_scheduling": "任务分解与调度",
+    "executing_tasks": "并行任务执行",
+    "online_search": "在线搜索",
+    "knowledge_search": "知识库搜索",
+    "lightrag_query": "LightRAG查询",
+    "response_generation": "响应生成",
+    "generating_answer": "结果整合与回答",
 }
 
 
@@ -285,11 +295,8 @@ class Pipeline:
         conversation_id = None
 
         try:
-            # 发送初始化状态
-            yield from self._emit_status(
-                __event_emitter__,
-                STATUS_MESSAGES["initializing"]
-            )
+            # 阶段1：初始化对话
+            yield from self._emit_status(FRONTEND_STATUSES["initializing"])
 
             # 获取或创建对话ID
             conversation_id = self._get_or_create_conversation(
@@ -299,15 +306,14 @@ class Pipeline:
                 chat_id=chat_id,
                 is_temporary=is_temporary,
                 user_token=user_token,
-                knowledge_bases=knowledge_bases,
-                __event_emitter__=__event_emitter__
+                knowledge_bases=knowledge_bases
             )
 
             if not conversation_id:
                 yield from self._create_error_response("无法创建对话会话")
                 return
 
-            # 发送消息并获取流式响应
+            # 阶段2：发送消息并获取流式响应
             yield from self._send_message_and_stream(
                 conversation_id=conversation_id,
                 user_message=user_message,
@@ -315,17 +321,12 @@ class Pipeline:
                 user_id=user_id,
                 mode=mode,
                 user_token=user_token,
-                knowledge_bases=knowledge_bases,
-                __event_emitter__=__event_emitter__
+                knowledge_bases=knowledge_bases
             )
 
         except Exception as e:
             error_msg = f"流式处理错误: {str(e)}"
-
-            yield from self._emit_status(
-                __event_emitter__,
-                STATUS_MESSAGES["error"]
-            )
+            yield from self._emit_status(f"处理失败: {error_msg}")
             yield from self._create_error_response(error_msg)
 
     def _get_or_create_conversation(
@@ -336,8 +337,7 @@ class Pipeline:
         chat_id: str,
         is_temporary: bool,
         user_token: str = None,
-        knowledge_bases: List[Dict[str, str]] = None,
-        __event_emitter__=None
+        knowledge_bases: List[Dict[str, str]] = None
     ) -> Optional[str]:
         """
         获取或创建对话会话
@@ -349,7 +349,6 @@ class Pipeline:
             chat_id: 前台传入的会话ID
             is_temporary: 是否为临时会话
             user_token: 用户认证token
-            __event_emitter__: 事件发射器
 
         Returns:
             对话ID，失败时返回None
@@ -361,7 +360,8 @@ class Pipeline:
                 if cache_key in self._conversation_cache:
                     conversation_id = self._conversation_cache[cache_key]
                     if self.valves.DEBUG_MODE:
-                        print(f"使用缓存的对话ID: {conversation_id}")
+                        # 使用status展示调试信息
+                        list(self._emit_status(f"使用缓存的对话ID: {conversation_id}"))
                     return conversation_id
                 
                 # 如果没有缓存，直接使用前台传入的会话ID
@@ -373,12 +373,6 @@ class Pipeline:
             if cache_key in self._conversation_cache:
                 conversation_id = self._conversation_cache[cache_key]
                 return conversation_id
-
-            # 发送创建对话状态
-            list(self._emit_status(
-                __event_emitter__,
-                STATUS_MESSAGES["creating_conversation"]
-            ))
 
             # 创建新对话
             conversation_id = self._create_new_conversation(
@@ -393,11 +387,15 @@ class Pipeline:
                 # 缓存对话ID
                 self._conversation_cache[cache_key] = conversation_id
                 if self.valves.DEBUG_MODE:
-                    print(f"创建新对话ID: {conversation_id}")
+                    # 使用status展示调试信息
+                    list(self._emit_status(f"创建新对话ID: {conversation_id}"))
 
             return conversation_id
 
         except Exception as e:
+            if self.valves.DEBUG_MODE:
+                # 使用status展示详细错误信息
+                list(self._emit_status(f"创建对话失败的详细错误: {str(e)}"))
             return None
 
     def _create_new_conversation(
@@ -440,6 +438,10 @@ class Pipeline:
             if user_token:
                 headers['Authorization'] = f'Bearer {user_token}'
 
+            if self.valves.DEBUG_MODE:
+                # 使用status展示请求信息
+                list(self._emit_status(f"正在创建对话... (模式: {mode}, 用户: {user_id})"))
+
             # 发送POST请求创建对话
             response = requests.post(
                 self.create_conversation_url,
@@ -458,6 +460,9 @@ class Pipeline:
             return None
 
         except Exception as e:
+            if self.valves.DEBUG_MODE:
+                # 使用status展示详细错误信息
+                list(self._emit_status(f"创建对话请求失败: {str(e)}"))
             return None
 
     def _send_message_and_stream(
@@ -468,8 +473,7 @@ class Pipeline:
         user_id: str,
         mode: str = None,
         user_token: str = None,
-        knowledge_bases: List[Dict[str, str]] = None,
-        __event_emitter__=None
+        knowledge_bases: List[Dict[str, str]] = None
     ) -> Generator[str, None, None]:
         """
         发送消息并处理流式响应
@@ -481,17 +485,13 @@ class Pipeline:
             user_id: 用户ID
             mode: 执行模式
             user_token: 用户认证token
-            __event_emitter__: 事件发射器
 
         Yields:
             流式响应内容
         """
         try:
-            # 发送消息状态
-            yield from self._emit_status(
-                __event_emitter__,
-                STATUS_MESSAGES["sending_message"]
-            )
+            # 阶段：发送消息
+            yield from self._emit_status(FRONTEND_STATUSES["sending_message"])
 
             # 构建请求数据
             request_data = {
@@ -526,6 +526,9 @@ class Pipeline:
             # 构建流式聊天URL
             stream_url = self.stream_chat_url.format(conversation_id)
 
+            if self.valves.DEBUG_MODE:
+                # 使用status展示请求信息
+                list(self._emit_status(f"正在请求后端服务... (URL: {stream_url[:50]}...)"))
 
             # 发送流式请求
             response = requests.post(
@@ -538,25 +541,28 @@ class Pipeline:
 
             response.raise_for_status()
 
-            # 发送处理状态
-            yield from self._emit_status(
-                __event_emitter__,
-                STATUS_MESSAGES["streaming"]
-            )
+            # 阶段：处理流式响应
+            yield from self._emit_status(FRONTEND_STATUSES["streaming"])
 
             # 处理流式响应
             content_received = False
-            for content in self._process_stream_lines(response, __event_emitter__):
-                if content and content.strip():
+            for content in self._process_stream_lines(response):
+                # 检查内容类型，避免对字典对象调用strip()方法
+                if isinstance(content, dict):
+                    # 状态事件，直接yield
+                    yield content
+                elif isinstance(content, str) and content.strip():
+                    # 字符串内容，检查是否非空
                     content_received = True
-                yield content
+                    yield content
+                elif content:
+                    # 其他类型的非空内容
+                    content_received = True
+                    yield content
             
             # 如果没有收到任何内容，提供反馈
             if not content_received:
-                yield from self._emit_status(
-                    __event_emitter__,
-                    "后端没有返回内容，可能是处理失败或配置问题"
-                )
+                yield from self._emit_status("后端没有返回内容，可能是处理失败或配置问题")
                 yield "\n⚠️ 后端只返回了状态信息，没有生成回答内容。\n可能的原因：\n1. 后端服务配置问题\n2. 模型或知识库未正确加载\n3. 问题类型不在处理范围内\n\n请检查后端服务状态或联系管理员。\n"
 
         except requests.exceptions.RequestException as e:
@@ -569,15 +575,13 @@ class Pipeline:
 
     def _process_stream_lines(
         self,
-        response: requests.Response,
-        __event_emitter__=None
-    ) -> Generator[str, None, None]:
+        response: requests.Response
+    ) -> Generator[Union[str, dict], None, None]:
         """
         处理流式响应行
 
         Args:
             response: HTTP响应对象
-            __event_emitter__: 事件发射器
 
         Yields:
             处理后的响应内容
@@ -593,16 +597,12 @@ class Pipeline:
 
                     # 检查结束标记
                     if data_content == "[DONE]":
-                        yield from self._emit_status(
-                            __event_emitter__,
-                            STATUS_MESSAGES["completed"]
-                        )
                         break
 
                     # 解析JSON数据
                     try:
                         data = json.loads(data_content)
-                        yield from self._handle_stream_data(data, __event_emitter__)
+                        yield from self._handle_stream_data(data)
                     except json.JSONDecodeError:
                         continue
                         
@@ -610,7 +610,7 @@ class Pipeline:
                 elif line.strip() and not line.startswith("event:") and not line.startswith("id:"):
                     try:
                         data = json.loads(line.strip())
-                        yield from self._handle_stream_data(data, __event_emitter__)
+                        yield from self._handle_stream_data(data)
                     except json.JSONDecodeError:
                         # 如果不是JSON，可能是纯文本内容，直接输出
                         yield line.strip()
@@ -621,15 +621,13 @@ class Pipeline:
 
     def _handle_stream_data(
         self,
-        data: Dict[str, Any],
-        __event_emitter__=None
-    ) -> Generator[str, None, None]:
+        data: Dict[str, Any]
+    ) -> Generator[Union[str, dict], None, None]:
         """
         处理流式数据
 
         Args:
             data: 流式数据
-            __event_emitter__: 事件发射器
 
         Yields:
             处理后的内容
@@ -638,36 +636,22 @@ class Pipeline:
             data_type = data.get("type", "")
 
             if data_type == CONTENT_TYPE:
-                # 内容响应 - 直接输出内容
+                # 内容响应 - 根据stage判断处理方式
                 content = data.get("content", "")
-                if content:
-                    yield content
-
-            elif data_type == STATUS_TYPE:
-                # 状态响应 - 发送状态事件
-                description = data.get("description", "")
                 stage = data.get("stage", "")
-
-                # 修复编码问题并处理状态信息
-                decoded_description = self._fix_encoding(description) if description else ""
-                decoded_stage = self._fix_encoding(stage) if stage else ""
                 
-                if decoded_description:
-                    yield from self._emit_status(__event_emitter__, decoded_description)
-                elif decoded_stage:
-                    yield from self._emit_status(__event_emitter__, f"当前阶段: {decoded_stage}")
-
-            elif data_type == PROGRESS_TYPE:
-                # 进度响应 - 发送进度事件
-                progress = data.get("progress", 0)
-                stage = data.get("stage", "")
-
-                progress_msg = f"进度: {int(progress * 100)}%"
-                if stage:
-                    decoded_stage = self._fix_encoding(stage)
-                    progress_msg += f" - {decoded_stage}"
-
-                yield from self._emit_status(__event_emitter__, progress_msg)
+                if not content:
+                    return
+                
+                # 修复编码问题
+                decoded_content = self._fix_encoding(content)
+                
+                if stage == "generating_answer":
+                    #generating_answer阶段直接输出内容（最终回答，不折叠）
+                    yield decoded_content
+                else:
+                    #其他阶段使用_emit_processing输出（折叠显示）
+                    yield from self._emit_processing(decoded_content, stage)
 
             elif data_type == ERROR_TYPE:
                 # 错误响应 - 输出错误信息
@@ -676,8 +660,6 @@ class Pipeline:
 
             else:
                 # 其他类型 - 尝试作为内容处理
-                pass
-                
                 # 尝试查找可能的内容字段
                 possible_content_fields = ["content", "message", "text", "response", "answer"]
                 for field in possible_content_fields:
@@ -693,46 +675,55 @@ class Pipeline:
                         yield value
                         break
 
-    def _emit_status(
+    def _emit_processing(
         self,
-        __event_emitter__,
-        description: str,
-        done: bool = False
-    ) -> Generator[str, None, None]:
+        content: str,
+        stage: str = "processing"
+    ) -> Generator[dict, None, None]:
         """
-        发送状态事件
+        发送处理过程内容 - 使用processing_content字段实现折叠显示
 
         Args:
-            __event_emitter__: 事件发射器
+            content: 处理内容
+            stage: 处理阶段
+
+        Yields:
+            处理事件
+        """
+        yield {
+            'choices': [{
+                'delta': {
+                    'processing_content': content + '\n',
+                    'processing_title': STAGE_TITLES.get(stage, "处理中")
+                },
+                'finish_reason': None
+            }]
+        }
+
+    def _emit_status(
+        self,
+        description: str,
+        done: bool = False
+    ) -> Generator[dict, None, None]:
+        """
+        发送状态事件 - 不折叠显示的状态信息
+
+        Args:
             description: 状态描述
             done: 是否完成
 
         Yields:
-            空生成器（用于兼容）
+            状态事件
         """
-        if __event_emitter__:
-            try:
-                # 使用asyncio运行异步事件发射器
-                import asyncio
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-
-                loop.run_until_complete(__event_emitter__({
-                    "type": "status",
-                    "data": {
-                        "description": description,
-                        "done": done,
-                    },
-                }))
-
-                loop.close()
-
-            except Exception as e:
-                pass
-
-        # 返回空生成器以保持一致性
-        if False:  # 永远不会执行，但使函数成为生成器
-            yield
+        yield {
+            "event": {
+                "type": "status",
+                "data": {
+                    "description": description,
+                    "done": done,
+                },
+            }
+        }
 
     def _fix_encoding(self, text: str) -> str:
         """
@@ -750,7 +741,7 @@ class Pipeline:
         # 在正确配置的Docker UTF-8环境中，直接返回原始文本
         return text
 
-    def _create_error_response(self, error_msg: str) -> Generator[str, None, None]:
+    def _create_error_response(self, error_msg: str) -> Generator[Union[str, dict], None, None]:
         """
         创建错误响应
 
@@ -760,6 +751,9 @@ class Pipeline:
         Yields:
             错误响应内容
         """
+        # 先发送错误处理信息
+        yield from self._emit_status(f"发生错误: {error_msg}")
+        # 然后输出错误内容（最终回答，不折叠）
         yield f"\n❌ 错误: {error_msg}\n"
 
     def _validate_knowledge_bases(self) -> None:
