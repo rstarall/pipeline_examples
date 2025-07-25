@@ -38,6 +38,7 @@ FRONTEND_STATUSES = {
     "creating_conversation": "正在创建对话会话...", 
     "sending_message": "正在向后端服务发送消息...",
     "streaming": "正在接收后端流式响应...",
+    "completed": "处理完成",
     "error": "处理发生错误",
 }
 
@@ -51,8 +52,24 @@ STAGE_TITLES = {
     "online_search": "在线搜索",
     "knowledge_search": "知识库搜索",
     "lightrag_query": "LightRAG查询",
-    "response_generation": "响应生成",
+    "response_generation": "响应生成(Agent)",
+    "report_generation":"检索结果",
     "generating_answer": "结果整合与回答",
+    "task_completed": "任务处理完成",
+}
+STAGE_GRUOP = {
+    "initialization": "stage_group_1",
+    "expanding_question": "stage_group_1",
+    "analyzing_question": "stage_group_1", 
+    "task_scheduling": "stage_group_2",
+    "executing_tasks": "stage_group_2",
+    "online_search": "stage_group_2",
+    "knowledge_search": "stage_group_2",
+    "lightrag_query": "stage_group_2",
+    "response_generation": "stage_group_2",
+    "report_generation":"stage_group_2",
+    "generating_answer": "stage_group_3",
+    "task_completed": "stage_group_3",
 }
 
 
@@ -559,11 +576,12 @@ class Pipeline:
                     # 其他类型的非空内容
                     content_received = True
                     yield content
-            
             # 如果没有收到任何内容，提供反馈
             if not content_received:
-                yield from self._emit_status("后端没有返回内容，可能是处理失败或配置问题")
+                yield from self._emit_status("后端没有返回内容，可能是处理失败或配置问题",done=True)
                 yield "\n⚠️ 后端只返回了状态信息，没有生成回答内容。\n可能的原因：\n1. 后端服务配置问题\n2. 模型或知识库未正确加载\n3. 问题类型不在处理范围内\n\n请检查后端服务状态或联系管理员。\n"
+            else:
+                yield from self._emit_status(FRONTEND_STATUSES["completed"],done=True)
 
         except requests.exceptions.RequestException as e:
             error_msg = f"请求错误: {str(e)}"
@@ -694,7 +712,8 @@ class Pipeline:
             'choices': [{
                 'delta': {
                     'processing_content': content + '\n',
-                    'processing_title': STAGE_TITLES.get(stage, "处理中")
+                    'processing_title': STAGE_TITLES.get(stage, "处理中"),
+                    'processing_stage': STAGE_GRUOP.get(stage, "stage_group_1")  # 添加stage信息用于组件区分
                 },
                 'finish_reason': None
             }]

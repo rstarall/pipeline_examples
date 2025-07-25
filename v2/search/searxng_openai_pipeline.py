@@ -1,5 +1,5 @@
 """
-title: SearxNG Search OpenAI Pipeline
+title: SearxNG OpenAI Pipeline
 author: open-webui
 date: 2024-12-20
 version: 1.0
@@ -14,6 +14,17 @@ import requests
 import time
 from typing import List, Union, Generator, Iterator
 from pydantic import BaseModel
+
+# 后端阶段标题映射
+STAGE_TITLES = {
+    "web_search": "网络搜索",
+    "openai_answer": "生成最终回答",
+}
+
+STAGE_GROUP = {
+    "web_search": "stage_group_1",
+    "openai_answer": "stage_group_2",
+}
 
 
 class HistoryContextManager:
@@ -484,6 +495,32 @@ class Pipeline:
             else:
                 return error_msg
 
+    def _emit_processing(
+        self,
+        content: str,
+        stage: str = "processing"
+    ) -> Generator[dict, None, None]:
+        """
+        发送处理过程内容 - 使用processing_content字段实现折叠显示
+
+        Args:
+            content: 处理内容
+            stage: 处理阶段
+
+        Yields:
+            处理事件
+        """
+        yield {
+            'choices': [{
+                'delta': {
+                    'processing_content': content + '\n',
+                    'processing_title': STAGE_TITLES.get(stage, "处理中"),
+                    'processing_stage': STAGE_GROUP.get(stage, "stage_group_1")
+                },
+                'finish_reason': None
+            }]
+        }
+
     def _stream_openai_response(self, url, headers, payload):
         """流式处理OpenAI响应"""
         try:
@@ -540,17 +577,33 @@ class Pipeline:
             yield "❌ 请输入有效的问题或查询内容"
             return
 
-        # 阶段1：查询优化
-        yield "🔄 **阶段1**: 正在优化搜索查询..."
-        optimized_query = self._optimize_search_query(user_message, messages)
-
-        if optimized_query != user_message:
-            yield f"✅ 查询已优化: `{optimized_query}`\n"
+        # 检查是否是流式模式  
+        stream_mode = body.get("stream", False) and self.valves.ENABLE_STREAMING
+        
+        # 阶段1：查询优化和搜索
+        if stream_mode:
+            # 流式模式使用折叠显示
+            for chunk in self._emit_processing("正在搜索相关信息...", "web_search"):
+                yield f'data: {json.dumps(chunk)}\n\n'
         else:
-            yield f"✅ 使用原始查询: `{user_message}`\n"
+            yield "🔍 **搜索阶段**: 正在搜索相关信息..."
+            
+        optimized_query = self._optimize_search_query(user_message, messages)
+        
+        if stream_mode:
+            search_info = f"✅ 搜索准备完成"
+            if optimized_query != user_message:
+                search_info += f"\n查询已优化: {optimized_query}"
+            else:
+                search_info += f"\n使用原始查询: {user_message}"
+            for chunk in self._emit_processing(search_info, "web_search"):
+                yield f'data: {json.dumps(chunk)}\n\n'
+        else:
+            if optimized_query != user_message:
+                yield f"✅ 查询已优化: `{optimized_query}`\n"
+            else:
+                yield f"✅ 使用原始查询: `{user_message}`\n"
 
-        # 阶段2：执行搜索
-        yield "🔍 **阶段2**: 正在搜索相关信息..."
         search_results, search_success = self._stage1_search(optimized_query)
 
         if not search_success:
@@ -562,10 +615,23 @@ class Pipeline:
             if not search_success:
                 # 如果搜索完全失败，提供基于OpenAI的回答
                 if self.valves.OPENAI_API_KEY:
-                    yield "❌ 搜索失败，将基于AI知识回答\n"
-                    yield "🤖 **阶段3**: 正在生成基于知识的回答..."
+                    if stream_mode:
+                        for chunk in self._emit_processing("❌ 搜索失败，将基于AI知识回答", "web_search"):
+                            yield f'data: {json.dumps(chunk)}\n\n'
+                        # 开始生成基于知识的回答
+                        answer_start_msg = {
+                            'choices': [{
+                                'delta': {
+                                    'content': "\n**💭 生成最终回答**\n"
+                                },
+                                'finish_reason': None
+                            }]
+                        }
+                        yield f"data: {json.dumps(answer_start_msg)}\n\n"
+                    else:
+                        yield "❌ 搜索失败，将基于AI知识回答\n"
+                        yield "🤖 **生成回答**: 正在生成基于知识的回答..."
                     fallback_prompt = f"用户问题: {user_message}\n\n由于无法获取搜索结果，请基于你的知识回答这个问题，并说明这是基于已有知识的回答，可能不是最新信息。"
-                    stream_mode = body.get("stream", False) and self.valves.ENABLE_STREAMING
 
                     if stream_mode:
                         for chunk in self._stage2_generate_answer(user_message, fallback_prompt, messages, stream=True):
@@ -582,13 +648,28 @@ class Pipeline:
                     return
 
         # 搜索成功，显示搜索结果
-        yield "✅ 搜索完成\n"
-        yield search_results
-        yield "\n"
+        if stream_mode:
+            for chunk in self._emit_processing(f"✅ 搜索完成\n{search_results}", "web_search"):
+                yield f'data: {json.dumps(chunk)}\n\n'
+        else:
+            yield "✅ 搜索完成\n"
+            yield search_results
+            yield "\n"
 
-        # 阶段3：生成AI回答
-        yield "🤖 **阶段3**: 正在基于搜索结果生成回答..."
-        stream_mode = body.get("stream", False) and self.valves.ENABLE_STREAMING
+        # 阶段2：生成AI回答 - 最终答案不折叠显示
+        if stream_mode:
+            # 流式模式开始生成回答的标识
+            answer_start_msg = {
+                'choices': [{
+                    'delta': {
+                        'content': "\n**💭 生成最终回答**\n"
+                    },
+                    'finish_reason': None
+                }]
+            }
+            yield f"data: {json.dumps(answer_start_msg)}\n\n"
+        else:
+            yield "🤖 **生成回答**: 正在基于搜索结果生成回答..."
 
         try:
             if stream_mode:

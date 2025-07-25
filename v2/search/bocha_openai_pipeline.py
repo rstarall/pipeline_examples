@@ -14,6 +14,19 @@ import requests
 from typing import List, Union, Generator, Iterator
 from pydantic import BaseModel
 
+# 后端阶段标题映射
+STAGE_TITLES = {
+    "query_optimization": "问题优化",
+    "web_search": "网络搜索", 
+    "openai_answer": "生成最终回答",
+}
+
+STAGE_GROUP = {
+    "query_optimization": "stage_group_1",
+    "web_search": "stage_group_2",
+    "openai_answer": "stage_group_3",
+}
+
 
 class Pipeline:
     class Valves(BaseModel):
@@ -398,6 +411,32 @@ class Pipeline:
                     except json.JSONDecodeError:
                         continue
 
+    def _emit_processing(
+        self,
+        content: str,
+        stage: str = "processing"
+    ) -> Generator[dict, None, None]:
+        """
+        发送处理过程内容 - 使用processing_content字段实现折叠显示
+
+        Args:
+            content: 处理内容
+            stage: 处理阶段
+
+        Yields:
+            处理事件
+        """
+        yield {
+            'choices': [{
+                'delta': {
+                    'processing_content': content + '\n',
+                    'processing_title': STAGE_TITLES.get(stage, "处理中"),
+                    'processing_stage': STAGE_GROUP.get(stage, "stage_group_1")
+                },
+                'finish_reason': None
+            }]
+        }
+
     def _stage1_optimize_query(self, user_query: str, messages: List[dict]) -> str:
         """第一阶段：LLM问题优化"""
         # 构建历史对话上下文
@@ -600,63 +639,35 @@ class Pipeline:
             yield f'data: {json.dumps({"choices": [{"delta": {}, "finish_reason": None}]})}\n\n'
 
             # 第一阶段：问题优化
-            optimize_msg = {
-                'choices': [{
-                    'delta': {
-                        'content': "**🔧 问题优化阶段**\n正在优化查询问题..."
-                    },
-                    'finish_reason': None
-                }]
-            }
-            yield f"data: {json.dumps(optimize_msg)}\n\n"
+            for chunk in self._emit_processing("正在优化查询问题...", "query_optimization"):
+                yield f"data: {json.dumps(chunk)}\n\n"
 
             optimized_query = self._stage1_optimize_query(query, messages)
 
-            optimize_result_msg = {
-                'choices': [{
-                    'delta': {
-                        'content': f"\n✅ 问题优化完成\n优化后查询: {optimized_query}\n"
-                    },
-                    'finish_reason': None
-                }]
-            }
-            yield f"data: {json.dumps(optimize_result_msg)}\n\n"
+            for chunk in self._emit_processing(f"✅ 问题优化完成\n优化后查询: {optimized_query}", "query_optimization"):
+                yield f"data: {json.dumps(chunk)}\n\n"
 
             # 第二阶段：搜索
-            search_msg = {
-                'choices': [{
-                    'delta': {
-                        'content': "\n**🔍 搜索阶段**\n正在搜索相关信息..."
-                    },
-                    'finish_reason': None
-                }]
-            }
-            yield f"data: {json.dumps(search_msg)}\n\n"
+            for chunk in self._emit_processing("正在搜索相关信息...", "web_search"):
+                yield f"data: {json.dumps(chunk)}\n\n"
 
             search_results, search_status, search_links = self._stage2_search(optimized_query)
 
-            search_result_msg = {
-                'choices': [{
-                    'delta': {
-                        'content': f"\n{search_status}\n"
-                    },
-                    'finish_reason': None
-                }]
-            }
-            yield f"data: {json.dumps(search_result_msg)}\n\n"
+            for chunk in self._emit_processing(search_status, "web_search"):
+                yield f"data: {json.dumps(chunk)}\n\n"
 
-            # 第三阶段：生成回答
+            # 第三阶段：生成回答 - 最终答案不折叠显示
             answer_start_msg = {
                 'choices': [{
                     'delta': {
-                        'content': "\n**💭 回答阶段**\n"
+                        'content': "\n**💭 生成最终回答**\n"
                     },
                     'finish_reason': None
                 }]
             }
             yield f"data: {json.dumps(answer_start_msg)}\n\n"
 
-            # 流式生成回答
+            # 流式生成回答 - 直接输出，不使用折叠显示
             try:
                 for chunk in self._stage3_answer(query, optimized_query, search_results, search_links, messages, stream=True):
                     if 'choices' in chunk and len(chunk['choices']) > 0:

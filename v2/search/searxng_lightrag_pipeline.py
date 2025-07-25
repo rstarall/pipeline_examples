@@ -15,6 +15,21 @@ import time
 from typing import List, Union, Generator, Iterator
 from pydantic import BaseModel
 
+# 后端阶段标题映射
+STAGE_TITLES = {
+    "query_optimization": "问题优化",
+    "web_search": "网络搜索",
+    "lightrag_query_generation": "LightRAG查询生成",
+    "lightrag_answer": "生成最终回答",
+}
+
+STAGE_GROUP = {
+    "query_optimization": "stage_group_1",
+    "web_search": "stage_group_1",
+    "lightrag_query_generation": "stage_group_2",
+    "lightrag_answer": "stage_group_3",
+}
+
 
 class Pipeline:
     class Valves(BaseModel):
@@ -371,6 +386,32 @@ class Pipeline:
                     except json.JSONDecodeError:
                         continue
 
+    def _emit_processing(
+        self,
+        content: str,
+        stage: str = "processing"
+    ) -> Generator[dict, None, None]:
+        """
+        发送处理过程内容 - 使用processing_content字段实现折叠显示
+
+        Args:
+            content: 处理内容
+            stage: 处理阶段
+
+        Yields:
+            处理事件
+        """
+        yield {
+            'choices': [{
+                'delta': {
+                    'processing_content': content + '\n',
+                    'processing_title': STAGE_TITLES.get(stage, "处理中"),
+                    'processing_stage': STAGE_GROUP.get(stage, "stage_group_1")
+                },
+                'finish_reason': None
+            }]
+        }
+
     def _stage1_optimize_query(self, user_query: str, messages: List[dict]) -> str:
         """第一阶段：基于对话历史的LLM问题优化"""
         context_messages = []
@@ -651,7 +692,7 @@ class Pipeline:
 
     def pipe(
         self, user_message: str, model_id: str, messages: List[dict], body: dict,
-        __event_emitter__=None, 
+        __event_emitter__=None,
         __event_call__=None,
         __user__=None
     ) -> Union[str, Generator, Iterator]:
@@ -699,86 +740,44 @@ class Pipeline:
             yield f'data: {json.dumps({"choices": [{"delta": {}, "finish_reason": None}]})}\n\n'
 
             # 第一阶段：问题优化
-            optimize_msg = {
-                'choices': [{
-                    'delta': {
-                        'content': "**🔧 第一阶段：问题优化**\n正在优化查询问题..."
-                    },
-                    'finish_reason': None
-                }]
-            }
-            yield f"data: {json.dumps(optimize_msg)}\n\n"
+            for chunk in self._emit_processing("正在优化查询问题...", "query_optimization"):
+                yield f"data: {json.dumps(chunk)}\n\n"
 
             optimized_query = self._stage1_optimize_query(query, messages)
 
-            optimize_result_msg = {
-                'choices': [{
-                    'delta': {
-                        'content': f"\n✅ 问题优化完成\n优化后查询: {optimized_query}\n"
-                    },
-                    'finish_reason': None
-                }]
-            }
-            yield f"data: {json.dumps(optimize_result_msg)}\n\n"
+            for chunk in self._emit_processing(f"✅ 问题优化完成\n优化后查询: {optimized_query}", "query_optimization"):
+                yield f"data: {json.dumps(chunk)}\n\n"
 
             # 第二阶段：搜索
-            search_msg = {
-                'choices': [{
-                    'delta': {
-                        'content': "\n**🔍 第二阶段：SearxNG搜索**\n正在搜索相关信息..."
-                    },
-                    'finish_reason': None
-                }]
-            }
-            yield f"data: {json.dumps(search_msg)}\n\n"
+            for chunk in self._emit_processing("正在搜索相关信息...", "web_search"):
+                yield f"data: {json.dumps(chunk)}\n\n"
 
             search_results, search_status, search_links = self._stage2_search(optimized_query)
 
-            search_result_msg = {
-                'choices': [{
-                    'delta': {
-                        'content': f"\n{search_status}\n"
-                    },
-                    'finish_reason': None
-                }]
-            }
-            yield f"data: {json.dumps(search_result_msg)}\n\n"
+            for chunk in self._emit_processing(search_status, "web_search"):
+                yield f"data: {json.dumps(chunk)}\n\n"
 
             # 第三阶段：生成LightRAG查询
-            lightrag_gen_msg = {
-                'choices': [{
-                    'delta': {
-                        'content': "\n**🧠 第三阶段：生成LightRAG查询**\n正在分析搜索结果并生成增强查询..."
-                    },
-                    'finish_reason': None
-                }]
-            }
-            yield f"data: {json.dumps(lightrag_gen_msg)}\n\n"
+            for chunk in self._emit_processing("✅ 正在分析搜索结果并生成增强查询...", "lightrag_query_generation"):
+                yield f"data: {json.dumps(chunk)}\n\n"
 
             lightrag_query = self._stage3_generate_lightrag_query(query, search_results, messages)
 
-            lightrag_gen_result_msg = {
-                'choices': [{
-                    'delta': {
-                        'content': f"\n✅ LightRAG查询生成完成\n增强查询: {lightrag_query[:100]}{'...' if len(lightrag_query) > 100 else ''}\n"
-                    },
-                    'finish_reason': None
-                }]
-            }
-            yield f"data: {json.dumps(lightrag_gen_result_msg)}\n\n"
+            for chunk in self._emit_processing(f"{lightrag_query[:100]}{'...' if len(lightrag_query) > 100 else ''}", "lightrag_query_generation"):
+                yield f"data: {json.dumps(chunk)}\n\n"
 
-            # 第四阶段：LightRAG问答
+            # 第四阶段：LightRAG问答 - 最终答案不折叠显示
             lightrag_answer_msg = {
                 'choices': [{
                     'delta': {
-                        'content': "\n**💭 第四阶段：LightRAG问答**\n"
+                        'content': "\n**💭 生成最终回答**\n"
                     },
                     'finish_reason': None
                 }]
             }
             yield f"data: {json.dumps(lightrag_answer_msg)}\n\n"
 
-            # 流式生成LightRAG回答
+            # 流式生成LightRAG回答 - 直接输出，不使用折叠显示
             try:
                 for chunk_data in self._stage4_query_lightrag(lightrag_query, stream=True):
                     yield chunk_data
