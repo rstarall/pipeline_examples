@@ -63,10 +63,18 @@ class PubChemSearcher:
     
     def __init__(self):
         self.client = httpx.AsyncClient(timeout=30.0)
+        self._is_closed = False
         
     async def cleanup(self):
         """Cleanup resources"""
-        await self.client.aclose()
+        if not self._is_closed:
+            try:
+                await self.client.aclose()
+                self._is_closed = True
+                logger.info("HTTP client closed successfully")
+            except Exception as e:
+                logger.error(f"Error closing HTTP client: {e}")
+                self._is_closed = True  # Mark as closed even if error occurred
     
     async def search_compound_pubchempy(
         self, 
@@ -141,6 +149,9 @@ class PubChemSearcher:
         search_type: str = "formula"
     ) -> List[ChemicalInfo]:
         """Search using direct PubChem REST API"""
+        if self._is_closed:
+            raise RuntimeError("HTTP client has been closed")
+        
         try:
             input_map = {
                 "name": "name",
@@ -199,6 +210,9 @@ class PubChemSearcher:
     
     async def _get_synonyms_direct(self, cid: int) -> List[str]:
         """Get synonyms using direct API"""
+        if self._is_closed:
+            return []
+        
         try:
             url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/synonyms/JSON"
             response = await self.client.get(url)
@@ -412,8 +426,12 @@ async def handle_call_tool(request: CallToolRequest) -> CallToolResult:
 
 async def main():
     """Main function to run the MCP server"""
+    searcher_instance = None
     try:
         logger.info("Starting PubChemPy MCP Server...")
+        
+        # Create searcher instance after logging start
+        searcher_instance = searcher
         
         # Run the server with stdio transport
         async with stdio_server() as (read_stream, write_stream):
@@ -429,12 +447,22 @@ async def main():
                     ),
                 ),
             )
+    except KeyboardInterrupt:
+        logger.info("Server stopped by user")
     except Exception as e:
         logger.error(f"Server failed to start: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         sys.exit(1)
     finally:
-        # Cleanup
-        await searcher.cleanup()
+        # Safely cleanup resources
+        if searcher_instance:
+            try:
+                await searcher_instance.cleanup()
+                logger.info("Cleanup completed successfully")
+            except Exception as cleanup_error:
+                logger.error(f"Cleanup failed: {cleanup_error}")
+                # Don't re-raise cleanup errors to avoid masking original error
 
 if __name__ == "__main__":
     asyncio.run(main()) 
