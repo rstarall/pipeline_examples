@@ -1,5 +1,5 @@
 """
-编写基于serper API的联网搜索pipeline,意图识别json返回
+编写基于serper API的联网搜索及lightrag问答 pipeline,意图识别json返回
 1.定义并识别网站类型
   wiki:url匹配wikipedia
   百度百科:url匹配baike.baidu
@@ -22,11 +22,11 @@
    - 根据阶段3的10个网页地址进行联网内容获取(协程并发)，获取到的是html
    - LLM进行内容解析，输出json格式
    - process展示信息源
-5.阶段5: 根据阶段4的内容和用户的问题进行最终的回答，答案要忠于信息源,内容丰富，准确
-
-参考文件:
+5.阶段5: 根据阶段4的内容和用户的问题进行lightrag问题优化，至少150字，要包含实体，关系，学术词语，丰富内容
+6.阶段6: 根据阶段5的优化lightrag问题进行lightrag问答，直接输出最终回答
+参考文件:v2\search\serper_openai_pipeline.py
 api参考:v2\search\test\serper_test.py
-处理参考:v2\search\searxng_openai_pipeline.py
+处理参考:v2\search\searxng_lightrag_pipeline.py
 """
 
 import os
@@ -47,15 +47,37 @@ STAGE_TITLES = {
     "query_optimization": "问题优化",
     "web_search": "网络搜索",
     "content_fetch": "内容获取", 
-    "final_answer": "生成最终回答",
+    "lightrag_query_generation": "LightRAG查询优化",
+    "lightrag_answer": "生成最终回答",
 }
 
 STAGE_GROUP = {
     "query_optimization": "stage_group_1",
     "web_search": "stage_group_2", 
     "content_fetch": "stage_group_3",
-    "final_answer": "stage_group_4",
+    "lightrag_query_generation": "stage_group_4",
+    "lightrag_answer": "stage_group_5",
 }
+
+# LightRAG查询生成示例
+LIGHTRAG_QUERY_EXAMPLE = """
+示例：
+用户问题: 护肤品中的烟酰胺有什么作用？
+
+搜索信息:
+[信息源1] 烟酰胺的护肤功效及作用机制
+网站类型: 百度百科
+内容摘要: 烟酰胺是维生素B3的一种形式，在护肤品中具有多种功效
+主要内容: 烟酰胺(Niacinamide)，也称为维生素B3或维生素PP，是水溶性维生素。在护肤品中，烟酰胺具有调节皮脂分泌、改善毛孔粗大、提亮肤色、抗氧化等多重功效。研究表明，5%浓度的烟酰胺可以有效减少皮脂分泌量，改善痘痘肌肤状况。烟酰胺还能抑制黑色素向角质细胞转移，从而起到美白效果...
+
+[信息源2] 烟酰胺在化妆品中的应用研究
+网站类型: 论文
+内容摘要: 详细分析了烟酰胺在各类护肤品中的添加量和效果
+主要内容: 烟酰胺作为护肤品的活性成分，其有效浓度通常在2%-10%之间。临床研究显示，含有烟酰胺的护肤品能够显著改善皮肤屏障功能，增加神经酰胺含量，减少经皮水分流失。此外，烟酰胺与其他成分如透明质酸、维生素C等具有良好的配伍性...
+
+生成的查询语句:
+我想了解烟酰胺这个成分在护肤领域的具体作用机制，特别是它是如何通过调节皮脂分泌来改善痘痘肌肤的，以及为什么5%的浓度被认为是有效的标准，另外烟酰胺抑制黑色素转移的生物学原理是什么，它与神经酰胺和透明质酸等其他护肤成分的协同作用机制又是怎样的，这些科学研究是如何证实烟酰胺能够同时实现控油、美白、修复皮肤屏障等多重功效的。
+"""
 
 class Pipeline:
     class Valves(BaseModel):
@@ -73,6 +95,12 @@ class Pipeline:
         OPENAI_MAX_TOKENS: int
         OPENAI_TEMPERATURE: float
         
+        # LightRAG配置
+        LIGHTRAG_BASE_URL: str
+        LIGHTRAG_DEFAULT_MODE: str
+        LIGHTRAG_TIMEOUT: int
+        LIGHTRAG_ENABLE_STREAMING: bool
+        
         # Pipeline配置
         ENABLE_STREAMING: bool
         DEBUG_MODE: bool
@@ -84,7 +112,7 @@ class Pipeline:
         HISTORY_TURNS: int
 
     def __init__(self):
-        self.name = "Serper Search OpenAI Pipeline"
+        self.name = "Serper Search LightRAG Pipeline"
         
         # 初始化token统计
         self.token_stats = {
@@ -109,6 +137,12 @@ class Pipeline:
                 "OPENAI_MAX_TOKENS": int(os.getenv("OPENAI_MAX_TOKENS", "4000")),
                 "OPENAI_TEMPERATURE": float(os.getenv("OPENAI_TEMPERATURE", "0.7")),
                 
+                # LightRAG配置
+                "LIGHTRAG_BASE_URL": os.getenv("LIGHTRAG_BASE_URL", "http://localhost:9621"),
+                "LIGHTRAG_DEFAULT_MODE": os.getenv("LIGHTRAG_DEFAULT_MODE", "hybrid"),
+                "LIGHTRAG_TIMEOUT": int(os.getenv("LIGHTRAG_TIMEOUT", "30")),
+                "LIGHTRAG_ENABLE_STREAMING": os.getenv("LIGHTRAG_ENABLE_STREAMING", "true").lower() == "true",
+                
                 # Pipeline配置
                 "ENABLE_STREAMING": os.getenv("ENABLE_STREAMING", "true").lower() == "true",
                 "DEBUG_MODE": os.getenv("DEBUG_MODE", "false").lower() == "true",
@@ -122,16 +156,26 @@ class Pipeline:
         )
 
     async def on_startup(self):
-        print(f"Serper Search OpenAI Pipeline启动: {__name__}")
+        print(f"Serper Search LightRAG Pipeline启动: {__name__}")
         
         # 验证必需的API密钥
         if not self.valves.OPENAI_API_KEY:
             print("❌ 缺少OpenAI API密钥，请设置OPENAI_API_KEY环境变量")
         if not self.valves.SERPER_API_KEY:
             print("❌ 缺少Serper API密钥，请设置SERPER_API_KEY环境变量")
+            
+        # 测试LightRAG连接
+        try:
+            response = requests.get(f"{self.valves.LIGHTRAG_BASE_URL}/health", timeout=5)
+            if response.status_code == 200:
+                print("✅ LightRAG服务连接成功")
+            else:
+                print(f"⚠️ LightRAG服务响应异常: {response.status_code}")
+        except Exception as e:
+            print(f"❌ 无法连接到LightRAG服务: {e}")
 
     async def on_shutdown(self):
-        print(f"Serper Search OpenAI Pipeline关闭: {__name__}")
+        print(f"Serper Search LightRAG Pipeline关闭: {__name__}")
 
     def _estimate_tokens(self, text: str) -> int:
         """简单的token估算函数"""
@@ -294,12 +338,13 @@ class Pipeline:
     "optimized_question_en": "optimized English question"
 }}
 
-优化原则：
+优化和输出原则：
 1. 提取核心关键词
 2. 去除冗余词汇
 3. 保留重要限定词
 4. 结合历史上下文理解用户真实意图
 5. 英文版本应该是准确的翻译并适合搜索
+6. 输出json格式,不要有任何其他内容
 
 历史对话上下文:
 {context_text if context_text else "无历史对话"}
@@ -468,85 +513,146 @@ class Pipeline:
             
             return enriched_results
 
-    def _stage5_generate_final_answer(self, user_message: str, enriched_results: List[dict], stream: bool = False) -> Union[str, Generator]:
-        """阶段5: 生成最终回答"""
-        # 构建信息源文本和链接列表
+    def _stage5_generate_lightrag_query(self, user_message: str, enriched_results: List[dict]) -> str:
+        """阶段5: 根据阶段4的内容和用户的问题进行lightrag问题优化"""
+        # 构建信息源文本
         source_content = ""
-        all_sources = []  # 包含所有来源，包括失败的
         successful_sources = []
         
         for i, result in enumerate(enriched_results, 1):
-            # 记录所有来源信息用于末尾链接展示
-            source_info = {
-                "index": i,
-                "title": result.get('title', '未知标题'),
-                "link": result['link'],
-                "website_type": result['website_type'],
-                "status": result.get("status", "unknown")
-            }
-            all_sources.append(source_info)
-            
             if result.get("status") == "success" and result.get("content"):
-                source_content += f"[来源{i}] {result.get('title', '未知标题')}\n"
-                source_content += f"链接: {result['link']}\n"
+                source_content += f"[信息源{i}] {result.get('title', '未知标题')}\n"
                 source_content += f"网站类型: {result['website_type']}\n"
                 source_content += f"内容摘要: {result['snippet']}\n"
-                source_content += f"主要内容: {result['content'][:8000]}...\n\n"
+                source_content += f"主要内容: {result['content'][:3000]}...\n\n"
                 successful_sources.append(i)
-            else:
-                # 即使获取失败，也添加基本信息
-                source_content += f"[来源{i}] {result.get('title', '未知标题')}\n"
-                source_content += f"链接: {result['link']}\n"
-                source_content += f"网站类型: {result['website_type']}\n"
-                source_content += f"内容摘要: {result.get('snippet', '无摘要')}\n"
-                source_content += f"状态: 内容获取失败 - {result.get('content', '未知错误')}\n\n"
         
         if not successful_sources:
-            return "抱歉，所有网页内容获取都失败了，无法提供基于网页内容的回答。"
-        
-        # 构建所有链接的markdown格式
-        all_links_md = ""
-        for source in all_sources:
-            status_indicator = "✅" if source["status"] == "success" else "❌"
-            all_links_md += f"{status_indicator} [{source['title']}]({source['link']}) ({source['website_type']})\n"
+            return f"基于搜索信息回答：{user_message}"
         
         system_prompt = ""
 
-        user_prompt = f"""我是一个专业的信息整合专家，需要基于提供的多个信息源，为用户提供准确、详细且有用的回答。
+        user_prompt = f"""我是一个专业的问题优化专家，需要根据用户的问题和搜索到的信息，生成一个自然、深入的查询语句，就像一个好奇的专家在思考和提问一样。
 
-核心要求：
-1. 必须使用所有{len(enriched_results)}个信息源的信息，不能遗漏任何一个
-2. 回答中要将引用处理成markdown链接格式：[标题](链接)
-3. 对于内容获取成功的来源，必须充分利用其内容
-4. 对于内容获取失败的来源，至少要提及其存在和相关性
-5. 回答必须忠于信息源，不能编造信息
-6. 内容要丰富、准确、结构清晰
-7. 如果不同来源有矛盾信息，请指出并说明
-8. 使用中文回答，语言自然流畅
+要求：
+1. 语言自然流畅，像人在思考时的表达方式，不要分条列点
+2. 从搜索信息中自行识别并包含具体的名词、实体、专业术语
+3. 围绕用户问题的核心关注点，不要涉及无关角度
+4. 长度至少150字，体现思考的深度
+5. 直接输出一段连贯的查询文字，不使用任何格式化标记
 
-回答结构要求：
-- 主体回答：基于所有信息源的综合回答，使用markdown链接引用
-- 末尾必须包含"## 参考来源"部分，列出所有{len(enriched_results)}个来源的完整链接
+{LIGHTRAG_QUERY_EXAMPLE}
 
-所有来源链接（请在回答末尾完整展示）：
-{all_links_md}
-
-特别注意：即使某些来源内容获取失败，也要在回答中提及其相关性，并在末尾链接中包含。
+现在请处理以下实际问题：
 
 用户问题: {user_message}
 
-信息源详情:
+搜索到的信息内容:
 {source_content}
 
-请基于以上所有{len(enriched_results)}个信息源为用户提供详细准确的回答，确保：
-1. 使用markdown链接格式引用来源
-2. 不遗漏任何一个信息源
-3. 末尾包含完整的参考来源列表"""
+请参考上面的示例，基于用户的问题和这些搜索信息，生成一个自然、深入的查询语句。要像一个专家在思考这个问题时的表达方式，从搜索信息中自行识别并使用相关的具体实体和名词，紧扣问题核心，不要分点或使用格式化。
 
-        if stream:
-            return self._stream_openai_response(user_prompt, system_prompt)
+直接输出查询语句："""
+
+        response = self._call_openai_api(system_prompt, user_prompt)
+        
+        # 确保生成的查询符合最小长度要求
+        if len(response) < 150:
+            # 如果太短，尝试重新生成一个更自然的查询
+            fallback_system = ""
+            fallback_user = f"我是一个专业的问题优化专家，需要生成一个自然、深入的查询语句，像专家在思考问题时的表达方式。\n\n针对'{user_message}'这个问题，请结合搜索到的相关信息，生成一个至少150字的自然查询语句，要包含具体的专业术语和概念，体现深度思考，不要分条列点。"
+            fallback_response = self._call_openai_api(fallback_system, fallback_user)
+            return fallback_response if len(fallback_response) >= 150 else f"我想深入理解{user_message}这个问题，特别是通过刚才搜索获得的这些资料，来全面掌握相关的核心概念、专业术语和内在机制，希望能够从多个层面来分析和理解这个主题的本质特征和重要意义。"
+        
+        return response
+
+    def _query_lightrag_standard(self, query: str, mode: str) -> dict:
+        """标准LightRAG查询API"""
+        url = f"{self.valves.LIGHTRAG_BASE_URL}/query"
+        payload = {
+            "query": query,
+            "mode": mode
+        }
+
+        headers = {"Content-Type": "application/json"}
+        
+        # 统计LightRAG查询的输入token
+        self._add_input_tokens(query)
+
+        try:
+            response = requests.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=self.valves.LIGHTRAG_TIMEOUT
+            )
+            response.raise_for_status()
+            result = response.json()
+            
+            # 统计LightRAG响应的输出token
+            if "response" in result:
+                self._add_output_tokens(result["response"])
+                
+            return result
+        except Exception as e:
+            return {"error": f"查询失败: {str(e)}"}
+
+    def _query_lightrag_streaming(self, query: str, mode: str) -> Generator[str, None, None]:
+        """流式LightRAG查询API"""
+        url = f"{self.valves.LIGHTRAG_BASE_URL}/query/stream"
+
+        payload = {
+            "query": query,
+            "mode": mode
+        }
+
+        headers = {"Content-Type": "application/json"}
+        
+        # 统计LightRAG查询的输入token
+        self._add_input_tokens(query)
+
+        try:
+            response = requests.post(
+                url,
+                json=payload,
+                headers=headers,
+                stream=True,
+                timeout=self.valves.LIGHTRAG_TIMEOUT
+            )
+            response.raise_for_status()
+
+            for line in response.iter_lines():
+                if line:
+                    line_text = line.decode('utf-8').strip()
+                    if line_text:
+                        try:
+                            data = json.loads(line_text)
+                            if 'response' in data and data['response']:
+                                chunk = data['response']
+                                # 统计LightRAG流式输出token
+                                self._add_output_tokens(chunk)
+                                yield chunk
+                            elif 'error' in data:
+                                error_msg = data['error']
+                                yield f"错误: {error_msg}"
+                        except json.JSONDecodeError:
+                            continue
+
+        except Exception as e:
+            error_msg = f"LightRAG流式查询失败: {str(e)}"
+            yield error_msg
+
+    def _stage6_query_lightrag(self, lightrag_query: str, stream: bool = False) -> Union[str, Generator]:
+        """阶段6: 根据阶段5的优化lightrag问题进行lightrag问答"""
+        mode = self.valves.LIGHTRAG_DEFAULT_MODE
+
+        if stream and self.valves.LIGHTRAG_ENABLE_STREAMING:
+            return self._query_lightrag_streaming(lightrag_query, mode)
         else:
-            return self._call_openai_api(system_prompt, user_prompt)
+            result = self._query_lightrag_standard(lightrag_query, mode)
+            if "error" in result:
+                return f"LightRAG查询失败: {result['error']}"
+            return result.get("response", "未获取到响应内容")
 
     def _stream_openai_response(self, user_prompt: str, system_prompt: str) -> Generator:
         """流式处理OpenAI响应"""
@@ -561,15 +667,12 @@ class Pipeline:
             "Content-Type": "application/json"
         }
         
-        # 构建消息列表，只有system_prompt不为空时才添加system消息
-        messages = []
-        if system_prompt and system_prompt.strip():
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": user_prompt})
-        
         payload = {
             "model": self.valves.OPENAI_MODEL,
-            "messages": messages,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
             "max_tokens": self.valves.OPENAI_MAX_TOKENS,
             "temperature": self.valves.OPENAI_TEMPERATURE,
             "stream": True
@@ -709,30 +812,76 @@ class Pipeline:
             else:
                 yield content_info
 
-            # 阶段5: 生成最终回答
+            # 阶段5: 生成LightRAG优化查询
+            if stream_mode:
+                for chunk in self._emit_processing("正在生成LightRAG优化查询...", "lightrag_query_generation"):
+                    yield f'data: {json.dumps(chunk)}\n\n'
+            else:
+                yield "🧠 **阶段5**: 正在生成LightRAG优化查询..."
+
+            lightrag_query = self._stage5_generate_lightrag_query(user_message, enriched_results)
+            
+            lightrag_info = f"✅ LightRAG查询生成完成\n查询内容: {lightrag_query[:200]}{'...' if len(lightrag_query) > 200 else ''}"
+            
+            if stream_mode:
+                for chunk in self._emit_processing(lightrag_info, "lightrag_query_generation"):
+                    yield f'data: {json.dumps(chunk)}\n\n'
+            else:
+                yield lightrag_info
+
+            # 阶段6: LightRAG问答
             if stream_mode:
                 # 流式模式开始生成回答的标识
                 answer_start_msg = {
                     'choices': [{
                         'delta': {
-                            'content': "\n**💭 生成最终回答**\n"
+                            'content': "\n**💭 LightRAG最终回答**\n"
                         },
                         'finish_reason': None
                     }]
                 }
                 yield f"data: {json.dumps(answer_start_msg)}\n\n"
-            else:
-                yield "🤖 **阶段5**: 正在基于获取的内容生成回答..."
-
-            # 生成最终回答
-            if stream_mode:
-                for chunk in self._stage5_generate_final_answer(user_message, enriched_results, stream=True):
-                    yield chunk
+                
+                # 流式生成LightRAG回答
+                lightrag_result = self._stage6_query_lightrag(lightrag_query, stream=True)
+                if isinstance(lightrag_result, str):
+                    # 非流式结果
+                    chunk_msg = {
+                        'choices': [{
+                            'delta': {
+                                'content': lightrag_result
+                            },
+                            'finish_reason': None
+                        }]
+                    }
+                    yield f"data: {json.dumps(chunk_msg)}\n\n"
+                else:
+                    # 流式结果
+                    for chunk in lightrag_result:
+                        chunk_msg = {
+                            'choices': [{
+                                'delta': {
+                                    'content': chunk
+                                },
+                                'finish_reason': None
+                            }]
+                        }
+                        yield f"data: {json.dumps(chunk_msg)}\n\n"
+                
                 # 流式模式结束后添加token统计
                 token_info = self._get_token_stats()
-                yield f"\n\n---\n📊 **Token统计**: 输入 {token_info['input_tokens']}, 输出 {token_info['output_tokens']}, 总计 {token_info['total_tokens']}"
+                token_msg = {
+                    'choices': [{
+                        'delta': {
+                            'content': f"\n\n---\n📊 **Token统计**: 输入 {token_info['input_tokens']}, 输出 {token_info['output_tokens']}, 总计 {token_info['total_tokens']}"
+                        },
+                        'finish_reason': None
+                    }]
+                }
+                yield f"data: {json.dumps(token_msg)}\n\n"
             else:
-                result = self._stage5_generate_final_answer(user_message, enriched_results, stream=False)
+                yield "🤖 **阶段6**: 正在基于优化查询进行LightRAG问答..."
+                result = self._stage6_query_lightrag(lightrag_query, stream=False)
                 yield result
                 # 添加token统计信息
                 token_info = self._get_token_stats()
