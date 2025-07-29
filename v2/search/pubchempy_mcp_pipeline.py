@@ -62,9 +62,6 @@ class Pipeline:
             "total_tokens": 0
         }
         
-        # MCP客户端配置
-        self.mcp_request_id = 1
-        
         self.valves = self.Valves(
             **{
                 # OpenAI配置
@@ -81,7 +78,7 @@ class Pipeline:
                 "MAX_TOOL_CALLS": int(os.getenv("MAX_TOOL_CALLS", "5")),
                 
                 # MCP配置
-                "MCP_REMOTE_URL": os.getenv("MCP_REMOTE_URL", "http://localhost:8000/mcp"),
+                "MCP_REMOTE_URL": os.getenv("MCP_REMOTE_URL", "http://localhost:8989"),
                 "MCP_TIMEOUT": int(os.getenv("MCP_TIMEOUT", "30")),
             }
         )
@@ -105,58 +102,95 @@ class Pipeline:
 
 
     async def _call_mcp_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """通过HTTP调用远程MCP工具"""
+        """通过HTTP调用远程化学搜索工具"""
         if not self.valves.MCP_REMOTE_URL:
             return {"error": "MCP服务器地址未配置"}
         
         try:
-            # 构建MCP调用请求
-            request = {
-                "jsonrpc": "2.0",
-                "id": self.mcp_request_id,
-                "method": "tools/call",
-                "params": {
-                    "name": tool_name,
-                    "arguments": arguments
+            # 构建直接HTTP API请求（而不是MCP JSON-RPC）
+            if tool_name == "search_chemical":
+                # 直接调用/search端点
+                search_url = f"{self.valves.MCP_REMOTE_URL.rstrip('/')}/search"
+                payload = {
+                    "query": arguments.get("query", ""),
+                    "search_type": arguments.get("search_type", "formula"),
+                    "use_fallback": arguments.get("use_fallback", False)
                 }
-            }
-            
-            # 增加请求ID
-            self.mcp_request_id += 1
-            
-            # 发送HTTP请求到远程MCP服务器
-            headers = {
-                "Content-Type": "application/json",
-                "Accept": "application/json"
-            }
-            
-            # 使用aiohttp进行异步HTTP请求
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self.valves.MCP_REMOTE_URL,
-                    headers=headers,
-                    json=request,
-                    timeout=aiohttp.ClientTimeout(total=self.valves.MCP_TIMEOUT)
-                ) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        
-                        if "result" in result:
-                            return result["result"]
+                
+                headers = {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                }
+                
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        search_url,
+                        headers=headers,
+                        json=payload,
+                        timeout=aiohttp.ClientTimeout(total=self.valves.MCP_TIMEOUT)
+                    ) as response:
+                        if response.status == 200:
+                            result = await response.json()
+                            
+                            # 将简化格式转换为MCP格式，保持兼容性
+                            if result.get("success"):
+                                # 构建MCP格式的content
+                                content_text = f"🧪 化学搜索结果\n"
+                                content_text += f"查询: {result.get('query', '')}\n"
+                                content_text += f"搜索类型: {result.get('search_type', '')}\n"
+                                content_text += f"数据源: {result.get('source', '')}\n"
+                                content_text += f"找到 {len(result.get('results', []))} 个化合物\n\n"
+                                
+                                for i, compound in enumerate(result.get('results', []), 1):
+                                    content_text += f"--- 化合物 {i} ---\n"
+                                    if compound.get('cid'):
+                                        content_text += f"PubChem CID: {compound['cid']}\n"
+                                    if compound.get('iupac_name'):
+                                        content_text += f"IUPAC名称: {compound['iupac_name']}\n"
+                                    if compound.get('molecular_formula'):
+                                        content_text += f"分子式: {compound['molecular_formula']}\n"
+                                    if compound.get('molecular_weight'):
+                                        content_text += f"分子量: {compound['molecular_weight']:.2f} g/mol\n"
+                                    if compound.get('smiles'):
+                                        content_text += f"SMILES: {compound['smiles']}\n"
+                                    if compound.get('inchi_key'):
+                                        content_text += f"InChI Key: {compound['inchi_key']}\n"
+                                    
+                                    if compound.get('synonyms'):
+                                        synonyms_text = ", ".join(compound['synonyms'][:5])
+                                        if len(compound['synonyms']) > 5:
+                                            synonyms_text += f" (还有{len(compound['synonyms']) - 5}个)"
+                                        content_text += f"同义名: {synonyms_text}\n"
+                                    
+                                    if compound.get('properties'):
+                                        content_text += "性质:\n"
+                                        for key, value in compound['properties'].items():
+                                            if value is not None:
+                                                key_formatted = key.replace('_', ' ').title()
+                                                content_text += f"  {key_formatted}: {value}\n"
+                                    
+                                    content_text += "\n"
+                                
+                                return {
+                                    "content": [
+                                        {"type": "text", "text": content_text}
+                                    ]
+                                }
+                            else:
+                                return {"error": result.get("error", "搜索失败")}
                         else:
-                            return {"error": result.get("error", "Unknown error")}
-                    else:
-                        return {"error": f"HTTP {response.status}: {await response.text()}"}
+                            return {"error": f"HTTP {response.status}: {await response.text()}"}
+            else:
+                return {"error": f"不支持的工具: {tool_name}"}
                 
         except asyncio.TimeoutError:
-            logger.error("MCP工具调用超时")
+            logger.error("化学搜索工具调用超时")
             return {"error": "请求超时"}
         except aiohttp.ClientError as e:
-            logger.error(f"MCP HTTP请求失败: {e}")
+            logger.error(f"化学搜索HTTP请求失败: {e}")
             return {"error": f"HTTP请求失败: {str(e)}"}
         except Exception as e:
-            logger.error(f"MCP工具调用失败: {e}")
+            logger.error(f"化学搜索工具调用失败: {e}")
             return {"error": str(e)}
 
     async def _search_chemical(self, query: str, search_type: str = "formula", use_fallback: bool = False) -> str:
