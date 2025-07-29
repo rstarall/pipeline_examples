@@ -442,40 +442,63 @@ async def main():
         searcher_instance = searcher
         
         if transport_mode == "http":
-            # HTTP transport mode (for Docker containers)
+            # HTTP transport mode (for Docker containers) 
             try:
-                from mcp.server.sse import SseServerTransport
                 from starlette.applications import Starlette
                 from starlette.routing import Route
-                from starlette.responses import Response
+                from starlette.responses import JSONResponse
+                from starlette.middleware.cors import CORSMiddleware
                 import uvicorn
                 
-                logger.info(f"Starting HTTP/SSE server on port {port}")
+                logger.info(f"Starting HTTP server on port {port}")
                 
-                # Create SSE transport
-                sse_transport = SseServerTransport("/messages")
+                # Health check endpoint
+                async def handle_health(request):
+                    return JSONResponse({
+                        "status": "ok", 
+                        "message": "PubChemPy MCP Server is running"
+                    })
                 
-                async def handle_sse(request):
-                    async with sse_transport.connect_sse(
-                        request.scope, request.receive, request._send
-                    ) as streams:
-                        await server.run(
-                            streams[0], streams[1],
-                            InitializationOptions(
-                                server_name="pubchempy-mcp-server",
-                                server_version="1.0.0",
-                                capabilities=server.get_capabilities(
-                                    notification_options=None,
-                                    experimental_capabilities=None
-                                ),
+                # Direct search endpoint
+                async def handle_search(request):
+                    try:
+                        body = await request.json()
+                        query = body.get("query", "")
+                        search_type = body.get("search_type", "formula")
+                        use_fallback = body.get("use_fallback", False)
+                        
+                        if not query:
+                            return JSONResponse(
+                                {"error": "Query parameter is required"},
+                                status_code=400
                             )
+                        
+                        # Use the searcher directly
+                        result = await searcher.search_chemical(query, search_type, use_fallback)
+                        
+                        return JSONResponse(result.model_dump())
+                        
+                    except Exception as e:
+                        logger.error(f"Search endpoint error: {e}")
+                        return JSONResponse(
+                            {"error": str(e)},
+                            status_code=500
                         )
-                    return Response()
                 
+                # Simplified routes - only health and search
                 app = Starlette(routes=[
-                    Route("/sse", handle_sse),
-                    Route("/messages", sse_transport.handle_post_message, methods=["POST"])
+                    Route("/health", handle_health, methods=["GET"]),
+                    Route("/search", handle_search, methods=["POST"])
                 ])
+                
+                # Add CORS middleware
+                app.add_middleware(
+                    CORSMiddleware,
+                    allow_origins=["*"],
+                    allow_credentials=True,
+                    allow_methods=["*"],
+                    allow_headers=["*"],
+                )
                 
                 config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
                 uvicorn_server = uvicorn.Server(config)
