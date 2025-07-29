@@ -31,6 +31,23 @@ from mcp.types import (
     EmbeddedResource,
 )
 
+# Try to import NotificationOptions from the correct location
+try:
+    from mcp.server import NotificationOptions
+except ImportError:
+    try:
+        from mcp.server.models import NotificationOptions
+    except ImportError:
+        try:
+            from mcp.types import NotificationOptions
+        except ImportError:
+            # Create a simple class if not found
+            class NotificationOptions:
+                def __init__(self):
+                    self.tools_changed = None
+                    self.resources_changed = None
+                    self.prompts_changed = None
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -435,13 +452,19 @@ async def main():
         
         # Run the server with stdio transport
         async with stdio_server() as (read_stream, write_stream):
+            # Create notification options
+            notification_options = NotificationOptions()
+            
             await server.run(
                 read_stream,
                 write_stream,
                 InitializationOptions(
                     server_name="pubchempy-mcp-server",
                     server_version="1.0.0",
-                    capabilities=server.get_capabilities(),
+                    capabilities=server.get_capabilities(
+                        notification_options=notification_options,
+                        experimental_capabilities={}
+                    ),
                 ),
             )
     except KeyboardInterrupt:
