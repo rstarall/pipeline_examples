@@ -9,6 +9,7 @@ using PubChem database via pubchempy library.
 import asyncio
 import json
 import logging
+import os
 from typing import Any, Dict, List, Optional, Sequence
 import sys
 
@@ -30,23 +31,6 @@ from mcp.types import (
     ImageContent,
     EmbeddedResource,
 )
-
-# Try to import NotificationOptions from the correct location
-try:
-    from mcp.server import NotificationOptions
-except ImportError:
-    try:
-        from mcp.server.models import NotificationOptions
-    except ImportError:
-        try:
-            from mcp.types import NotificationOptions
-        except ImportError:
-            # Create a simple class if not found
-            class NotificationOptions:
-                def __init__(self):
-                    self.tools_changed = None
-                    self.resources_changed = None
-                    self.prompts_changed = None
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -444,29 +428,80 @@ async def handle_call_tool(request: CallToolRequest) -> CallToolResult:
 async def main():
     """Main function to run the MCP server"""
     searcher_instance = None
+    
+    # Check transport mode and port configuration
+    transport_mode = os.getenv("MCP_TRANSPORT", "stdio").lower()
+    port = int(os.getenv("PORT", "8989"))
+    
     try:
-        logger.info("Starting PubChemPy MCP Server...")
+        logger.info(f"Starting PubChemPy MCP Server on {transport_mode} transport...")
+        if transport_mode == "http":
+            logger.info(f"HTTP server will listen on port {port}")
         
         # Create searcher instance after logging start
         searcher_instance = searcher
         
-        # Run the server with stdio transport
-        async with stdio_server() as (read_stream, write_stream):
-            # Create notification options
-            notification_options = NotificationOptions()
-            
-            await server.run(
-                read_stream,
-                write_stream,
-                InitializationOptions(
-                    server_name="pubchempy-mcp-server",
-                    server_version="1.0.0",
-                    capabilities=server.get_capabilities(
-                        notification_options=notification_options,
-                        experimental_capabilities={}
+        if transport_mode == "http":
+            # HTTP transport mode (for Docker containers)
+            try:
+                from mcp.server.sse import SseServerTransport
+                from starlette.applications import Starlette
+                from starlette.routing import Route
+                from starlette.responses import Response
+                import uvicorn
+                
+                logger.info(f"Starting HTTP/SSE server on port {port}")
+                
+                # Create SSE transport
+                sse_transport = SseServerTransport("/messages")
+                
+                async def handle_sse(request):
+                    async with sse_transport.connect_sse(
+                        request.scope, request.receive, request._send
+                    ) as streams:
+                        await server.run(
+                            streams[0], streams[1],
+                            InitializationOptions(
+                                server_name="pubchempy-mcp-server",
+                                server_version="1.0.0",
+                                capabilities=server.get_capabilities(
+                                    notification_options=None,
+                                    experimental_capabilities=None
+                                ),
+                            )
+                        )
+                    return Response()
+                
+                app = Starlette(routes=[
+                    Route("/sse", handle_sse),
+                    Route("/messages", sse_transport.handle_post_message, methods=["POST"])
+                ])
+                
+                config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
+                uvicorn_server = uvicorn.Server(config)
+                await uvicorn_server.serve()
+                
+            except ImportError as e:
+                logger.error(f"HTTP transport dependencies not available: {e}")
+                logger.info("Falling back to stdio transport...")
+                transport_mode = "stdio"
+        
+        if transport_mode == "stdio":
+            # Stdio transport mode (traditional MCP)
+            logger.info("Using stdio transport")
+            async with stdio_server() as (read_stream, write_stream):
+                await server.run(
+                    read_stream,
+                    write_stream,
+                    InitializationOptions(
+                        server_name="pubchempy-mcp-server",
+                        server_version="1.0.0",
+                        capabilities=server.get_capabilities(
+                            notification_options=None,
+                            experimental_capabilities=None
+                        ),
                     ),
-                ),
-            )
+                )
     except KeyboardInterrupt:
         logger.info("Server stopped by user")
     except Exception as e:

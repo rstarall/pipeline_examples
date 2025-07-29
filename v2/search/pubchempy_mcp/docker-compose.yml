@@ -7,12 +7,17 @@ services:
       dockerfile: Dockerfile
       args:
         - USE_CN_MIRRORS=${USE_CN_MIRRORS:-true}
+    ports:
+      - "8989:8989"  # MCP HTTP server port
     environment:
       - LOG_LEVEL=info
       - PYTHONPATH=/app
       - USE_CN_MIRRORS=${USE_CN_MIRRORS:-true}
+      - PORT=8989
+      - MCP_TRANSPORT=http
     volumes:
       - ./logs:/app/logs
+      - ./src:/app/src  # Hot reload: mount source code
     restart: unless-stopped
     stdin_open: true
     tty: true
