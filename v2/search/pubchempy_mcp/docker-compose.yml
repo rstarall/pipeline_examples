@@ -2,10 +2,15 @@ version: '3.8'
 
 services:
   mcp-server:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - USE_CN_MIRRORS=${USE_CN_MIRRORS:-true}
     environment:
       - LOG_LEVEL=info
       - PYTHONPATH=/app
+      - USE_CN_MIRRORS=${USE_CN_MIRRORS:-true}
     volumes:
       - ./logs:/app/logs
     restart: unless-stopped
