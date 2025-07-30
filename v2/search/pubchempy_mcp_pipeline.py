@@ -445,7 +445,8 @@ TOOL_CALL:search_chemical:{"query": "转换后的英文/分子式/SMILES", "sear
 
 当前用户问题: {user_message}
 
-请根据上下文和当前问题，决定是否需要调用化学搜索工具。如果需要，请按照指定格式回复工具调用。"""
+请根据上下文和当前问题，决定是否需要调用化学搜索工具。如果需要，请按照指定格式回复工具调用。
+回答要忠于上下文、当前问题、搜索到的信息。"""
         
         tool_call_count = 0
         collected_tool_results = []
