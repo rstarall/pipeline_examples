@@ -363,7 +363,7 @@ class Pipeline:
                 else:
                     return {"error": f"OpenAI API调用失败: {str(e)}"}
 
-    def _query_lightrag_stream(self, query: str, mode: str = None, stage: str = "retrieval", stream_callback=None) -> dict:
+    def _query_lightrag_stream(self, query: str, mode: str = None, stage: str = "retrieval") -> Generator[str, None, None]:
         """调用LightRAG进行流式检索，支持实时流式输出"""
         if not mode:
             mode = self.valves.LIGHTRAG_DEFAULT_MODE
@@ -394,12 +394,18 @@ class Pipeline:
             )
             response.raise_for_status()
             
+            # 设置较小的缓冲区以确保实时性
+            response.raw.decode_content = True
+            
             collected_content = ""
             buffer = ""
             
             # 使用缓冲区处理NDJSON流式响应
-            for chunk in response.iter_content(chunk_size=1024, decode_unicode=True):
+            for chunk in response.iter_content(chunk_size=1024):
                 if chunk:
+                    # 确保chunk是字符串类型
+                    if isinstance(chunk, bytes):
+                        chunk = chunk.decode('utf-8', errors='ignore')
                     buffer += chunk
                     
                     # 按行分割处理NDJSON
@@ -413,17 +419,26 @@ class Pipeline:
                                 
                                 # 检查是否有错误
                                 if "error" in json_data:
-                                    return {"error": f"LightRAG查询失败: {json_data['error']}"}
+                                    yield json.dumps({"error": f"LightRAG查询失败: {json_data['error']}"})
+                                    return
                                 
                                 # 处理正常响应
                                 if "response" in json_data:
                                     response_content = json_data["response"]
                                     collected_content += response_content
                                     
-                                    # 立即进行流式输出（如果提供了回调函数）
-                                    if stream_callback:
-                                        for chunk_emit in self._emit_processing(response_content, stage):
-                                            stream_callback(f"data: {json.dumps(chunk_emit)}\n\n")
+                                    # 立即进行流式输出 - 正确格式的流式数据
+                                    chunk_emit = {
+                                        'choices': [{
+                                            'delta': {
+                                                'processing_content': response_content,
+                                                'processing_title': STAGE_TITLES.get(stage, "处理中"),
+                                                'processing_stage': STAGE_GROUP.get(stage, "stage_group_1")
+                                            },
+                                            'finish_reason': None
+                                        }]
+                                    }
+                                    yield f"data: {json.dumps(chunk_emit)}\n\n"
                                     
                             except json.JSONDecodeError as e:
                                 if self.valves.DEBUG_MODE:
@@ -437,11 +452,22 @@ class Pipeline:
                     if "response" in json_data:
                         response_content = json_data["response"]
                         collected_content += response_content
-                        if stream_callback:
-                            for chunk_emit in self._emit_processing(response_content, stage):
-                                stream_callback(f"data: {json.dumps(chunk_emit)}\n\n")
+                        
+                        # 最后的流式输出
+                        chunk_emit = {
+                            'choices': [{
+                                'delta': {
+                                    'processing_content': response_content,
+                                    'processing_title': STAGE_TITLES.get(stage, "处理中"),
+                                    'processing_stage': STAGE_GROUP.get(stage, "stage_group_1")
+                                },
+                                'finish_reason': None
+                            }]
+                        }
+                        yield f"data: {json.dumps(chunk_emit)}\n\n"
                     elif "error" in json_data:
-                        return {"error": f"LightRAG查询失败: {json_data['error']}"}
+                        yield json.dumps({"error": f"LightRAG查询失败: {json_data['error']}"})
+                        return
                 except json.JSONDecodeError:
                     if self.valves.DEBUG_MODE:
                         print(f"警告: 无法解析最后的响应片段: {buffer}")
@@ -450,10 +476,11 @@ class Pipeline:
             if collected_content:
                 self._add_output_tokens(collected_content)
                 
-            return {"response": collected_content} if collected_content else {"error": "未获取到检索结果"}
+            # 返回最终收集的内容 - 这是非流式数据，用于收集完整结果
+            yield json.dumps({"response": collected_content}) if collected_content else json.dumps({"error": "未获取到检索结果"})
                 
         except Exception as e:
-            return {"error": f"LightRAG流式查询失败: {str(e)}"}
+            yield json.dumps({"error": f"LightRAG流式查询失败: {str(e)}"})
 
 
 
@@ -595,7 +622,11 @@ class Pipeline:
                 if not line or not line.strip():
                     continue
 
-                line = line.decode('utf-8')    
+                # 确保line是字符串类型
+                if isinstance(line, bytes):
+                    line = line.decode('utf-8', errors='ignore')
+                else:
+                    line = str(line)    
                 if line.startswith("data: "):
                     data_content = line[6:].strip()
                     
@@ -631,7 +662,7 @@ class Pipeline:
     # 管线2 - 多阶段检索管线（流式版本）
     # ===========================================
 
-    def _pipeline2_stage1_retrieval_stream(self, optimized_query: str, messages: List[dict], stream_callback=None) -> tuple:
+    def _pipeline2_stage1_retrieval_stream(self, optimized_query: str, messages: List[dict]) -> Generator[tuple, None, None]:
         """管线2阶段1：初始检索（流式版本）"""
         try:
             context = self._get_conversation_context(messages)
@@ -646,28 +677,41 @@ class Pipeline:
             response = self._call_openai_api(messages_for_api, stream=False)
             
             if "error" in response:
-                return f"第一阶段查询优化失败: {response['error']}", ""
+                yield (f"第一阶段查询优化失败: {response['error']}", "")
+                return
                 
             stage1_query = response.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
             
             # 执行LightRAG检索（使用流式查询获取结果）
-            lightrag_result = self._query_lightrag_stream(stage1_query, stage="stage1_retrieval", stream_callback=stream_callback)
+            collected_content = ""
+            error_occurred = False
             
-            if "error" in lightrag_result:
-                return stage1_query, f"第一阶段检索失败: {lightrag_result['error']}"
-                
-            stage1_results = lightrag_result.get("response", "未获取到检索结果")
+            for stream_data in self._query_lightrag_stream(stage1_query, stage="stage1_retrieval"):
+                if stream_data.startswith("data: "):
+                    # 这是流式数据，直接输出
+                    yield ("stream_data", stream_data)
+                else:
+                    # 这是最终结果或错误
+                    try:
+                        result_data = json.loads(stream_data)
+                        if "error" in result_data:
+                            yield (stage1_query, f"第一阶段检索失败: {result_data['error']}")
+                            return
+                        elif "response" in result_data:
+                            collected_content = result_data["response"]
+                    except json.JSONDecodeError:
+                        pass
             
-            return stage1_query, stage1_results
+            yield (stage1_query, collected_content or "未获取到检索结果")
             
         except Exception as e:
             if self.valves.DEBUG_MODE:
                 print(f"❌ 管线2阶段1失败: {e}")
-            return "", f"第一阶段检索失败: {str(e)}"
+            yield ("", f"第一阶段检索失败: {str(e)}")
 
 
 
-    def _pipeline2_stage2_retrieval_stream(self, optimized_query: str, stage1_query: str, stage1_results: str, stream_callback=None) -> tuple:
+    def _pipeline2_stage2_retrieval_stream(self, optimized_query: str, stage1_query: str, stage1_results: str) -> Generator[tuple, None, None]:
         """管线2阶段2：基于第一阶段结果的深度检索（流式版本）"""
         try:
             # 生成第二阶段检索查询
@@ -681,27 +725,39 @@ class Pipeline:
             response = self._call_openai_api(messages_for_api, stream=False)
             
             if "error" in response:
-                return f"第二阶段查询优化失败: {response['error']}", ""
+                yield (f"第二阶段查询优化失败: {response['error']}", "")
+                return
                 
             stage2_query = response.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
             
             # 执行LightRAG检索（使用流式版本获取结果）
-            lightrag_result = self._query_lightrag_stream(stage2_query, stage="stage2_retrieval", stream_callback=stream_callback)
+            collected_content = ""
             
-            if "error" in lightrag_result:
-                return stage2_query, f"第二阶段检索失败: {lightrag_result['error']}"
-                
-            stage2_results = lightrag_result.get("response", "未获取到检索结果")
+            for stream_data in self._query_lightrag_stream(stage2_query, stage="stage2_retrieval"):
+                if stream_data.startswith("data: "):
+                    # 这是流式数据，直接输出
+                    yield ("stream_data", stream_data)
+                else:
+                    # 这是最终结果或错误
+                    try:
+                        result_data = json.loads(stream_data)
+                        if "error" in result_data:
+                            yield (stage2_query, f"第二阶段检索失败: {result_data['error']}")
+                            return
+                        elif "response" in result_data:
+                            collected_content = result_data["response"]
+                    except json.JSONDecodeError:
+                        pass
             
-            return stage2_query, stage2_results
+            yield (stage2_query, collected_content or "未获取到检索结果")
             
         except Exception as e:
             if self.valves.DEBUG_MODE:
                 print(f"❌ 管线2阶段2失败: {e}")
-            return "", f"第二阶段检索失败: {str(e)}"
+            yield ("", f"第二阶段检索失败: {str(e)}")
 
     def _pipeline2_stage3_retrieval_stream(self, optimized_query: str, stage1_query: str, stage1_results: str, 
-                                   stage2_query: str, stage2_results: str, stream_callback=None) -> tuple:
+                                   stage2_query: str, stage2_results: str) -> Generator[tuple, None, None]:
         """管线2阶段3：综合性检索（流式版本）"""
         try:
             # 生成第三阶段检索查询
@@ -717,24 +773,36 @@ class Pipeline:
             response = self._call_openai_api(messages_for_api, stream=False)
             
             if "error" in response:
-                return f"第三阶段查询优化失败: {response['error']}", ""
+                yield (f"第三阶段查询优化失败: {response['error']}", "")
+                return
                 
             stage3_query = response.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
             
             # 执行LightRAG检索（使用流式版本获取结果）
-            lightrag_result = self._query_lightrag_stream(stage3_query, stage="stage3_retrieval", stream_callback=stream_callback)
+            collected_content = ""
             
-            if "error" in lightrag_result:
-                return stage3_query, f"第三阶段检索失败: {lightrag_result['error']}"
-                
-            stage3_results = lightrag_result.get("response", "未获取到检索结果")
+            for stream_data in self._query_lightrag_stream(stage3_query, stage="stage3_retrieval"):
+                if stream_data.startswith("data: "):
+                    # 这是流式数据，直接输出
+                    yield ("stream_data", stream_data)
+                else:
+                    # 这是最终结果或错误
+                    try:
+                        result_data = json.loads(stream_data)
+                        if "error" in result_data:
+                            yield (stage3_query, f"第三阶段检索失败: {result_data['error']}")
+                            return
+                        elif "response" in result_data:
+                            collected_content = result_data["response"]
+                    except json.JSONDecodeError:
+                        pass
             
-            return stage3_query, stage3_results
+            yield (stage3_query, collected_content or "未获取到检索结果")
             
         except Exception as e:
             if self.valves.DEBUG_MODE:
                 print(f"❌ 管线2阶段3失败: {e}")
-            return "", f"第三阶段检索失败: {str(e)}"
+            yield ("", f"第三阶段检索失败: {str(e)}")
 
     def _pipeline2_final_synthesis_stream(self, optimized_query: str, stage1_query: str, stage1_results: str,
                                   stage2_query: str, stage2_results: str, stage3_query: str, stage3_results: str) -> str:
@@ -840,17 +908,16 @@ class Pipeline:
             for chunk in self._emit_processing("正在进行第一阶段检索...\n", "stage1_retrieval"):
                 yield f"data: {json.dumps(chunk)}\n\n"
 
-            # 创建stream_callback来收集实时输出
-            stream_buffer = []
-            def stream_callback(data):
-                stream_buffer.append(data)
-
-            stage1_query, stage1_results = self._pipeline2_stage1_retrieval_stream(optimized_query, messages, stream_callback)
-            
-            # 输出收集到的流式数据
-            for buffered_data in stream_buffer:
-                yield buffered_data
-            stream_buffer.clear()
+            # 处理第一阶段流式检索
+            stage1_query = ""
+            stage1_results = ""
+            for result in self._pipeline2_stage1_retrieval_stream(optimized_query, messages):
+                if result[0] == "stream_data":
+                    # 立即输出流式数据
+                    yield result[1]
+                else:
+                    # 保存最终结果
+                    stage1_query, stage1_results = result
 
             for chunk in self._emit_processing(f"✅ 第一阶段检索完成\n\n**检索查询:**\n{stage1_query}\n\n**检索结果长度:** {len(stage1_results)} 字符", "stage1_retrieval"):
                 yield f"data: {json.dumps(chunk)}\n\n"
@@ -859,12 +926,16 @@ class Pipeline:
             for chunk in self._emit_processing("正在进行第二阶段深度检索...\n", "stage2_retrieval"):
                 yield f"data: {json.dumps(chunk)}\n\n"
 
-            stage2_query, stage2_results = self._pipeline2_stage2_retrieval_stream(optimized_query, stage1_query, stage1_results, stream_callback)
-            
-            # 输出收集到的流式数据
-            for buffered_data in stream_buffer:
-                yield buffered_data
-            stream_buffer.clear()
+            # 处理第二阶段流式检索
+            stage2_query = ""
+            stage2_results = ""
+            for result in self._pipeline2_stage2_retrieval_stream(optimized_query, stage1_query, stage1_results):
+                if result[0] == "stream_data":
+                    # 立即输出流式数据
+                    yield result[1]
+                else:
+                    # 保存最终结果
+                    stage2_query, stage2_results = result
 
             for chunk in self._emit_processing(f"✅ 第二阶段检索完成\n\n**检索查询:**\n{stage2_query}\n\n**检索结果长度:** {len(stage2_results)} 字符", "stage2_retrieval"):
                 yield f"data: {json.dumps(chunk)}\n\n"
@@ -873,14 +944,18 @@ class Pipeline:
             for chunk in self._emit_processing("正在进行第三阶段综合检索...\n", "stage3_retrieval"):
                 yield f"data: {json.dumps(chunk)}\n\n"
 
-            stage3_query, stage3_results = self._pipeline2_stage3_retrieval_stream(
-                optimized_query, stage1_query, stage1_results, stage2_query, stage2_results, stream_callback
-            )
-            
-            # 输出收集到的流式数据
-            for buffered_data in stream_buffer:
-                yield buffered_data
-            stream_buffer.clear()
+            # 处理第三阶段流式检索
+            stage3_query = ""
+            stage3_results = ""
+            for result in self._pipeline2_stage3_retrieval_stream(
+                optimized_query, stage1_query, stage1_results, stage2_query, stage2_results
+            ):
+                if result[0] == "stream_data":
+                    # 立即输出流式数据
+                    yield result[1]
+                else:
+                    # 保存最终结果
+                    stage3_query, stage3_results = result
 
             for chunk in self._emit_processing(f"✅ 第三阶段检索完成\n\n**检索查询:**\n{stage3_query}\n\n**检索结果长度:** {len(stage3_results)} 字符", "stage3_retrieval"):
                 yield f"data: {json.dumps(chunk)}\n\n"
