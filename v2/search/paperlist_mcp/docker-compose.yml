@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  paperlist-fastmcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8990:8990"  # FastMCP HTTP server port
+    environment:
+      - PYTHONPATH=/app
+      - PORT=8990
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./src:/app/src  # Hot reload: mount source code
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    networks:
+      - paperlist-mcp-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8990/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  paperlist-mcp-network:
+    driver: bridge

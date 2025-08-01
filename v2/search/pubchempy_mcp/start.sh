@@ -1,10 +1,10 @@
 #!/bin/bash
 
-# PubChemPy MCP Server Startup Script
+# PubChemPy FastMCP Server Startup Script
 
 set -e  # Exit on any error
 
-echo "🧪 Starting PubChemPy MCP Server..."
+echo "🧪 Starting PubChemPy FastMCP Server..."
 
 # Check if Python is available
 if ! command -v python3 &> /dev/null; then
@@ -33,22 +33,25 @@ echo "📥 Installing dependencies..."
 pip install --upgrade pip
 pip install -r requirements.txt
 
-# Create logs directory if it doesn't exist
-mkdir -p logs
+# Install requests for native client (optional)
+echo "📦 Installing requests for native client..."
+pip install requests
 
 # Set environment variables
 export PYTHONPATH="${PYTHONPATH}:$(pwd)"
-export LOG_LEVEL="${LOG_LEVEL:-info}"
 
-echo "🌐 MCP Server configuration:"
-echo "  Protocol: Model Context Protocol (stdio)"
-echo "  Log Level: $LOG_LEVEL"
+echo "🚀 FastMCP Server configuration:"
+echo "  Framework: FastMCP 2.0"
+echo "  Protocol: Model Context Protocol"
+echo "  Transport: HTTP only"
+echo "  Port: ${PORT:-8989}"
 echo "  Available Tools: search_chemical"
+echo "  Available Resources: health://status, server://info"
 
-# Start the MCP server
-echo "🚀 Starting MCP Server..."
-echo "📝 Note: This server uses stdio protocol for MCP communication."
-echo "   Connect it to your LLM client that supports MCP protocol."
+# Start the FastMCP server
+echo "🌟 Starting FastMCP Server..."
+echo "📝 Note: This server uses HTTP transport for web API access."
+echo "   Server will be available at http://localhost:${PORT:-8989}"
 echo ""
 
-python -m src.mcp_server 
+python src/mcp_server.py 

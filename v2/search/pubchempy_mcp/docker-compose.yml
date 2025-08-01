@@ -1,33 +1,23 @@
 version: '3.8'
 
 services:
-  mcp-server:
+  pubchempy-fastmcp:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        - USE_CN_MIRRORS=${USE_CN_MIRRORS:-true}
     ports:
-      - "8989:8989"  # MCP HTTP server port
+      - "8989:8989"  # FastMCP HTTP server port
     environment:
-      - LOG_LEVEL=info
       - PYTHONPATH=/app
-      - USE_CN_MIRRORS=${USE_CN_MIRRORS:-true}
       - PORT=8989
-      - MCP_TRANSPORT=http
     volumes:
-      - ./logs:/app/logs
       - ./src:/app/src  # Hot reload: mount source code
     restart: unless-stopped
     stdin_open: true
     tty: true
     networks:
-      - mcp-network
+      - fastmcp-network
 
 networks:
-  mcp-network:
-    driver: bridge
-
-volumes:
-  logs:
-    driver: local 
+  fastmcp-network:
+    driver: bridge 

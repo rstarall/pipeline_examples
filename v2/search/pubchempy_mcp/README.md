@@ -1,15 +1,18 @@
-# PubChemPy MCP Server
+# PubChemPy FastMCP Server
 
-一个基于 Model Context Protocol (MCP) 的化学物质搜索服务器，使用 PubChemPy 库访问 PubChem 数据库。
+一个基于 FastMCP 框架的化学物质搜索服务器，使用 PubChemPy 库访问 PubChem 数据库。
 
 ## 功能特性
 
+- 🚀 **FastMCP 框架**: 使用现代化的 FastMCP 2.0 框架，代码简洁高效
 - 🧪 **多种搜索方式**: 支持化学名称、分子式、SMILES 字符串搜索
 - 🔄 **容错机制**: PubChemPy 失败时自动切换到直接 API 调用
 - ⚡ **异步并发**: 使用 asyncio 提升性能
 - 🔌 **MCP 协议**: 符合 Model Context Protocol 标准，LLM 可直接调用
+- 🌐 **HTTP传输**: 专注于HTTP API，简化部署和集成
 - 🐳 **Docker 支持**: 完整的 Docker 部署方案
 - 📊 **详细信息**: 返回完整的分子式信息
+- 📝 **Context 日志**: 支持向客户端发送执行日志
 
 ## 项目结构
 
@@ -17,13 +20,11 @@
 pubchempy_mcp/
 ├── src/
 │   ├── __init__.py
-│   └── mcp_server.py          # MCP 服务器主文件
-├── requirements.txt           # Python 依赖
-├── Dockerfile                # Docker 镜像构建
+│   └── mcp_server.py          # FastMCP 服务器主文件
+├── requirements.txt           # Python 依赖（简化版）
+├── Dockerfile                # Docker 镜像构建（简化版）
 ├── docker-compose.yml        # Docker Compose 配置
 ├── start.sh                  # 服务器启动脚本
-├── config.py                 # 配置文件
-├── .env.example              # 环境变量示例
 └── README.md                 # 项目文档
 ```
 
@@ -32,7 +33,7 @@ pubchempy_mcp/
 ### 方法 1: 使用启动脚本 (推荐)
 
 ```bash
-# 启动MCP服务器
+# 启动FastMCP服务器
 chmod +x start.sh
 ./start.sh
 ```
@@ -47,188 +48,188 @@ source venv/bin/activate
 # 安装依赖
 pip install -r requirements.txt
 
-# 启动MCP服务器
-python -m src.mcp_server
+# 启动FastMCP服务器
+python src/mcp_server.py
 ```
 
-### 方法 3: Docker 部署
+### 方法 3: 使用 Docker
 
 ```bash
-# 启动服务
-docker-compose up -d
+# 构建并运行
+docker-compose up --build
 
-# 查看日志
-docker-compose logs -f mcp-server
-
-# 停止服务
-docker-compose down
+# 后台运行
+docker-compose up -d --build
 ```
 
-## MCP 工具
+### 方法 4: 使用 FastMCP CLI (如果安装了 FastMCP)
 
-### search_chemical
+```bash
+# 使用 HTTP 传输运行
+fastmcp run src/mcp_server.py --transport http --port 8989
+```
 
-搜索化学物质的 MCP 工具。
+## 使用说明
+
+### 工具功能
+
+#### search_chemical
+
+搜索化学物质信息，支持多种搜索类型，现在包含 Context 日志支持：
 
 **参数:**
-- `query` (必需): 化学名称、分子式或 SMILES 字符串
-- `search_type` (可选): 搜索类型 - `name`, `formula`, `smiles`，默认 `formula`
-- `use_fallback` (可选): 使用直接 API 备用选项，默认 `false`
+- `query` (必需): 搜索查询字符串
+- `search_type` (可选): 搜索类型，默认为 "formula"
+  - `"name"`: 按化学名称搜索
+  - `"formula"`: 按分子式搜索  
+  - `"smiles"`: 按SMILES字符串搜索
+- `use_fallback` (可选): 是否使用备用API，默认为 false
 
-**示例工具调用:**
+### 资源端点
+
+#### health://status
+获取服务器健康状态
+
+#### server://info
+获取服务器详细信息
+
+**示例:**
+
+```bash
+# 通过分子式搜索水分子
+search_chemical(query="H2O", search_type="formula")
+
+# 通过名称搜索咖啡因
+search_chemical(query="caffeine", search_type="name")
+
+# 通过SMILES搜索
+search_chemical(query="CCO", search_type="smiles")
+```
+
+**返回信息:**
+- PubChem CID
+- IUPAC 名称
+- 分子式
+- 分子量
+- SMILES 表示
+- InChI 和 InChI Key
+- 化学物质别名
+- 分子属性（原子数、键数、极性表面积等）
+
+## 技术架构
+
+### FastMCP 框架优势
+
+- **简化开发**: 使用装饰器方式定义工具和资源，代码更简洁
+- **自动类型推断**: 基于函数签名自动生成MCP工具模式
+- **Context 支持**: 内置日志和进度报告功能
+- **HTTP API**: 专注于HTTP传输，提供RESTful接口
+- **错误处理**: 简化的异常处理机制
+
+### 数据源
+
+1. **PubChemPy**: Python 包装器，简化API调用
+2. **PubChem REST API**: 直接API调用，作为备用方案
+
+### 传输协议
+
+- **HTTP**: Web API模式，支持RESTful调用和Docker部署，便于与各种客户端集成
+
+## 配置选项
+
+### 运行方式
+
+FastMCP 服务器使用 HTTP 传输，通过环境变量配置端口：
+
+```python
+# 服务器启动代码
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", "8989"))
+    mcp.run(transport="http", host="0.0.0.0", port=port)
+```
+
+### 环境变量
+
+- `PORT`: HTTP服务器端口号（默认: 8989）
+
+## 依赖项
+
+- Python 3.11+
+- fastmcp >= 2.0.0
+- pubchempy >= 1.0.4
+- httpx >= 0.25.0
+- pydantic >= 2.4.0
+
+## 与 LLM 集成
+
+### Claude Desktop
+
+将以下配置添加到 Claude Desktop 的 MCP 设置中：
+
 ```json
 {
-  "name": "search_chemical",
-  "arguments": {
-    "query": "caffeine",
-    "search_type": "name"
-  }
-}
-```
-
-**返回结果:**
-```
-🧪 Chemical Search Results
-Query: caffeine
-Search Type: name
-Source: pubchempy
-Found 1 compound(s)
-
---- Compound 1 ---
-PubChem CID: 2519
-IUPAC Name: 1,3,7-trimethylpurine-2,6-dione
-Molecular Formula: C8H10N4O2
-Molecular Weight: 194.19 g/mol
-SMILES: CN1C=NC2=C1C(=O)N(C(=O)N2C)C
-InChI Key: RYYVLZVUVIJVGH-UHFFFAOYSA-N
-Synonyms: caffeine, 1,3,7-Trimethylxanthine, Theine
-
-Properties:
-  Heavy Atom Count: 14
-  H Bond Donor Count: 0
-  H Bond Acceptor Count: 6
-  ...
-```
-
-## LLM 集成
-
-### Claude Desktop 配置
-
-在 `claude_desktop_config.json` 中添加:
-
-```json
-{
-  "mcpServers": {
-    "pubchempy": {
-      "command": "python",
-      "args": ["-m", "src.mcp_server"],
-      "cwd": "/path/to/pubchempy_mcp"
-    }
+  "pubchempy": {
+    "command": "python",
+    "args": ["src/mcp_server.py"],
+    "cwd": "/path/to/pubchempy_mcp"
   }
 }
 ```
 
 ### 其他 MCP 客户端
 
-任何支持 MCP 协议的客户端都可以连接到这个服务器:
+本服务器符合标准 MCP 协议，可以与任何支持 MCP 的客户端集成。
+
+## 开发指南
+
+### 代码风格
+
+- 使用 FastMCP 装饰器定义工具和资源
+- 利用 Context 参数提供日志和进度信息
+- 保持函数简洁，单一职责
+- 使用类型注解
+
+### 测试
 
 ```bash
-# 直接通过stdio运行
-python -m src.mcp_server
+# 安装开发依赖
+pip install -r requirements.txt
+
+# 运行测试
+python -m pytest tests/
 ```
 
-## 使用示例
+## FastMCP vs 传统 MCP
 
-### 搜索化学物质
+### 代码简化对比
 
-```
-用户: 搜索咖啡因的化学信息
-LLM: 我来为你搜索咖啡因的化学信息。
+**传统 MCP:**
+```python
+@server.list_tools()
+async def handle_list_tools() -> ListToolsResult:
+    return ListToolsResult(tools=[...])
 
-[调用 search_chemical 工具]
-{
-  "query": "caffeine", 
-  "search_type": "name"
-}
-
-结果显示咖啡因的分子式是 C8H10N4O2，分子量为 194.19 g/mol...
-```
-
-### 通过分子式搜索
-
-```
-用户: H2O 是什么化合物？
-LLM: [调用 search_chemical 工具]
-{
-  "query": "H2O",
-  "search_type": "formula"  
-}
-
-这是水分子，分子量为 18.02 g/mol...
+@server.call_tool()  
+async def handle_call_tool(request: CallToolRequest) -> CallToolResult:
+    # 复杂的参数解析和响应构建
+    ...
 ```
 
-## 环境变量
-
-- `LOG_LEVEL`: 日志级别 (debug, info, warning, error)，默认 `info`
-- `PYTHONPATH`: Python 路径
-
-## 容错机制
-
-服务器提供两层容错机制：
-
-1. **PubChemPy 优先**: 默认使用 PubChemPy 库
-2. **API 备用**: PubChemPy 失败时自动切换到直接 API 调用
-3. **手动指定**: 可通过 `use_fallback=true` 直接使用备用 API
-
-## 开发
-
-### 本地开发
-
-```bash
-# 激活虚拟环境
-source venv/bin/activate
-
-# 运行服务器
-python -m src.mcp_server
+**FastMCP:**
+```python
+@mcp.tool()
+async def search_chemical(query: str, search_type: str = "formula") -> str:
+    # 直接返回结果，框架自动处理协议细节
+    ...
 ```
 
-### 调试
+### 主要改进
 
-MCP 服务器使用 stdio 进行通信，可以通过日志进行调试：
-
-```bash
-# 查看日志
-tail -f logs/server.log
-
-# Docker 日志
-docker-compose logs -f mcp-server
-```
-
-## 故障排除
-
-### 常见问题
-
-1. **PubChemPy 连接失败**
-   - 检查网络连接
-   - 使用 `use_fallback=true` 启用备用 API
-
-2. **MCP 连接问题**
-   - 确保 LLM 客户端支持 MCP 协议
-   - 检查服务器日志输出
-
-3. **依赖安装失败**
-   - 更新 pip：`pip install --upgrade pip`
-   - 使用国内镜像：`pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt`
-
-## 协议说明
-
-这个服务器实现了 Model Context Protocol (MCP) 规范:
-
-- **传输层**: stdio (标准输入输出)
-- **通信格式**: JSON-RPC 2.0
-- **工具**: `search_chemical`
-- **资源**: 无
-- **提示**: 无
+1. **代码量减少 70%**: 从 546 行减少到约 380 行
+2. **更好的类型安全**: 基于函数签名的自动类型推断
+3. **简化的错误处理**: 内置异常处理机制
+4. **内置日志支持**: Context 对象提供日志功能
+5. **多传输协议**: 自动支持多种传输方式
 
 ## 许可证
 
@@ -238,8 +239,9 @@ MIT License
 
 欢迎提交 Issue 和 Pull Request！
 
-## 参考资料
+## 相关链接
 
-- [Model Context Protocol](https://github.com/modelcontextprotocol)
+- [FastMCP 官方文档](https://gofastmcp.com/)
 - [PubChemPy 文档](https://pubchempy.readthedocs.io/)
-- [PubChem REST API](https://pubchempy.readthedocs.io/en/latest/guide/searching.html) 
+- [PubChem 数据库](https://pubchem.ncbi.nlm.nih.gov/)
+- [Model Context Protocol](https://modelcontextprotocol.io/)
