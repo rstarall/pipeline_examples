@@ -5,12 +5,22 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # APT mirror configuration (comment out to use default)
+        APT_MIRROR: ${APT_MIRROR:-http://mirrors.aliyun.com}
+        # PIP mirror configuration (comment out to use default)
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+        PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-pypi.tuna.tsinghua.edu.cn}
     ports:
       - "8990:8990"  # FastMCP HTTP server port
     environment:
       - PYTHONPATH=/app
       - PORT=8990
       - PYTHONUNBUFFERED=1
+      # Mirror configuration for runtime (if needed)
+      - APT_MIRROR=${APT_MIRROR:-http://mirrors.aliyun.com}
+      - PIP_INDEX_URL=${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+      - PIP_TRUSTED_HOST=${PIP_TRUSTED_HOST:-pypi.tuna.tsinghua.edu.cn}
     volumes:
       - ./src:/app/src  # Hot reload: mount source code
     restart: unless-stopped

@@ -370,6 +370,93 @@ async def search_chemical_api(request: Request) -> JSONResponse:
 
 
 
+@mcp.custom_route("/api/tags", methods=["GET"])
+async def list_tags(request: Request) -> JSONResponse:
+    """List all available tags from tools and resources"""
+    try:
+        # Get all tools and resources to extract tags
+        tools = mcp.get_tools()
+        resources = mcp.get_resources()
+        
+        tags = set()
+        
+        # Extract tags from tools
+        for tool in tools:
+            if hasattr(tool, 'tags') and tool.tags:
+                tags.update(tool.tags)
+        
+        # Extract tags from resources  
+        for resource in resources:
+            if hasattr(resource, 'tags') and resource.tags:
+                tags.update(resource.tags)
+        
+        sorted_tags = sorted(list(tags))
+        
+        return JSONResponse({
+            "success": True,
+            "count": len(sorted_tags),
+            "tags": sorted_tags
+        })
+        
+    except Exception as e:
+        logger.error(f"Error listing tags: {e}")
+        return JSONResponse(
+            {"error": f"Failed to list tags: {str(e)}"}, 
+            status_code=500
+        )
+
+@mcp.custom_route("/api/tools/by-tag/{tag}", methods=["GET"])
+async def get_tools_by_tag(request: Request) -> JSONResponse:
+    """Get tools filtered by specific tag"""
+    try:
+        tag = request.path_params.get("tag")
+        if not tag:
+            return JSONResponse(
+                {"error": "Tag parameter is required"}, 
+                status_code=400
+            )
+        
+        # Get all tools and filter by tag
+        all_tools = mcp.get_tools()
+        filtered_tools = []
+        
+        for tool in all_tools:
+            if hasattr(tool, 'tags') and tool.tags and tag in tool.tags:
+                tool_info = {
+                    "name": tool.name,
+                    "description": tool.description or "No description available",
+                    "tags": list(tool.tags) if tool.tags else [],
+                    "parameters": {}
+                }
+                
+                # Add parameter information if available
+                if hasattr(tool, 'input_schema') and tool.input_schema:
+                    schema = tool.input_schema
+                    if isinstance(schema, dict) and 'properties' in schema:
+                        for param_name, param_info in schema['properties'].items():
+                            tool_info["parameters"][param_name] = {
+                                "type": param_info.get("type", "unknown"),
+                                "description": param_info.get("description", "No description")
+                            }
+                
+                filtered_tools.append(tool_info)
+        
+        return JSONResponse({
+            "success": True,
+            "tag": tag,
+            "count": len(filtered_tools),
+            "tools": filtered_tools
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting tools by tag: {e}")
+        return JSONResponse(
+            {"error": f"Failed to get tools by tag: {str(e)}"}, 
+            status_code=500
+        )
+
+
+
 @mcp.custom_route("/api/health", methods=["GET"])
 async def api_health_check(request: Request) -> JSONResponse:
     """API health check endpoint"""
@@ -380,7 +467,6 @@ async def api_health_check(request: Request) -> JSONResponse:
         "endpoints": {
             "mcp": "/mcp",
             "tools_by_tag": "/api/tools/by-tag/{tag}",
-            "resources_by_tag": "/api/resources/by-tag/{tag}",
             "search_chemical": "/api/search/chemical",
             "list_tags": "/api/tags",
             "health": "/api/health"
