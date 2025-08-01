@@ -2,7 +2,7 @@
 PubChemPy MCP Pipeline V2 - 基于MCP协议的化学信息查询管道
 
 功能特性:
-1. 通过/api/tools/by-tag/{tag}动态获取MCP工具信息
+1. 通过MCP JSON-RPC协议的tools/list方法动态发现工具，根据tag进行过滤
 2. 使用MCP JSON-RPC协议进行工具调用
 3. 支持流式输出和多轮工具调用
 4. 智能工具选择和参数生成
@@ -116,37 +116,54 @@ class Pipeline:
         print("🔚 Pipeline已关闭")
 
     async def _discover_mcp_tools(self):
-        """发现MCP服务器的工具"""
+        """通过MCP JSON-RPC协议发现服务器工具"""
         if not self.valves.MCP_SERVER_URL:
             raise Exception("MCP服务器地址未配置")
         
         try:
-            tools_url = f"{self.valves.MCP_SERVER_URL.rstrip('/')}/api/tools/by-tag/{self.valves.MCP_TAG}"
+            # 构建MCP JSON-RPC请求
+            mcp_request = {
+                "jsonrpc": "2.0",
+                "method": "tools/list",
+                "id": 1
+            }
+            
+            mcp_url = f"{self.valves.MCP_SERVER_URL.rstrip('/')}/mcp"
             
             async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    tools_url,
+                async with session.post(
+                    mcp_url,
+                    json=mcp_request,
+                    headers={"Content-Type": "application/json"},
                     timeout=aiohttp.ClientTimeout(total=self.valves.MCP_TIMEOUT)
                 ) as response:
                     if response.status == 200:
-                        tools_data = await response.json()
+                        mcp_response = await response.json()
                         
-                        # 解析工具信息
-                        if "tools" in tools_data:
-                            for tool in tools_data["tools"]:
+                        if "error" in mcp_response:
+                            raise Exception(f"MCP error: {mcp_response['error']}")
+                        
+                        tools = mcp_response.get("result", {}).get("tools", [])
+                        
+                        # 根据tag过滤工具并解析工具信息
+                        for tool in tools:
+                            tool_tags = tool.get("tags", [])
+                            # 只加载匹配指定tag的工具
+                            if self.valves.MCP_TAG in tool_tags:
                                 tool_name = tool.get("name")
                                 if tool_name:
                                     self.mcp_tools[tool_name] = {
                                         "name": tool_name,
                                         "description": tool.get("description", ""),
                                         "input_schema": tool.get("inputSchema", {}),
-                                        "tags": tool.get("tags", [])
+                                        "tags": tool_tags
                                     }
                         
                         self.tools_loaded = True
-                        logger.info(f"Successfully discovered {len(self.mcp_tools)} MCP tools")
+                        logger.info(f"Successfully discovered {len(self.mcp_tools)} MCP tools with tag '{self.valves.MCP_TAG}'")
                     else:
-                        raise Exception(f"HTTP {response.status}: {await response.text()}")
+                        error_text = await response.text()
+                        raise Exception(f"HTTP {response.status}: {error_text}")
                         
         except Exception as e:
             logger.error(f"MCP tool discovery failed: {e}")
