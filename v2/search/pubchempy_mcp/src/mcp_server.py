@@ -326,10 +326,9 @@ async def search_chemical(
 
 
 # Custom HTTP endpoints
-
-@mcp.custom_route("/api/search/chemical", methods=["POST"])
+@mcp.custom_route("/search", methods=["POST"])
 async def search_chemical_api(request: Request) -> JSONResponse:
-    """Direct API endpoint for chemical search using tagged tools"""
+    """Direct API endpoint for chemical search - compatible with legacy pipeline"""
     try:
         # Parse request body
         body = await request.json()
@@ -349,16 +348,56 @@ async def search_chemical_api(request: Request) -> JSONResponse:
                 status_code=400
             )
         
-        # Call the search_chemical function directly
-        result = await search_chemical(query, search_type, use_fallback, None)
+        # Get structured data instead of formatted text
+        results = []
+        source = "pubchempy"
+        error = None
         
+        if not use_fallback:
+            try:
+                results = await search_pubchempy(query, search_type)
+            except Exception as e:
+                error = f"PubChemPy search failed: {str(e)}"
+                # Auto-fallback to direct API
+                try:
+                    results = await search_direct_api(query, search_type)
+                    source = "direct_api"
+                    error = None
+                except Exception as e2:
+                    error = f"Both PubChemPy and direct API failed. PubChemPy: {str(e)}, Direct API: {str(e2)}"
+        else:
+            # Use direct API
+            try:
+                results = await search_direct_api(query, search_type)
+                source = "direct_api"
+            except Exception as e:
+                error = f"Direct API search failed: {str(e)}"
+        
+        # Convert ChemicalInfo objects to dictionaries for JSON serialization
+        results_dict = []
+        for compound in results:
+            compound_dict = {
+                "cid": compound.cid,
+                "iupac_name": compound.iupac_name,
+                "molecular_formula": compound.molecular_formula,
+                "molecular_weight": compound.molecular_weight,
+                "smiles": compound.smiles,
+                "inchi": compound.inchi,
+                "inchi_key": compound.inchi_key,
+                "synonyms": compound.synonyms,
+                "properties": compound.properties
+            }
+            results_dict.append(compound_dict)
+        
+        # Return format compatible with legacy pipeline
         return JSONResponse({
-            "success": True,
+            "success": len(results_dict) > 0 and error is None,
             "query": query,
             "search_type": search_type,
-            "result": result,
-            "endpoint": "custom_api",
-            "tags_used": ["search", "chemistry"]
+            "results": results_dict,  # 关键：使用results而不是result
+            "source": source,
+            "error": error,
+            "total_count": len(results_dict)
         })
         
     except Exception as e:
@@ -367,7 +406,6 @@ async def search_chemical_api(request: Request) -> JSONResponse:
             {"error": f"Search failed: {str(e)}"}, 
             status_code=500
         )
-
 
 
 # Removed custom tag-based API endpoints - tool discovery and filtering

@@ -14,6 +14,7 @@ import requests
 import asyncio
 import aiohttp
 import time
+import uuid
 from typing import List, Union, Generator, Iterator, Dict, Any, Optional, AsyncGenerator
 from pydantic import BaseModel
 import logging
@@ -68,6 +69,9 @@ class Pipeline:
         # MCP工具缓存
         self.mcp_tools = {}
         self.tools_loaded = False
+        
+        # 生成唯一的MCP会话ID
+        self.session_id = str(uuid.uuid4())
         
         self.valves = self.Valves(
             **{
@@ -134,7 +138,11 @@ class Pipeline:
                 async with session.post(
                     mcp_url,
                     json=mcp_request,
-                    headers={"Content-Type": "application/json"},
+                    headers={
+                        "Content-Type": "application/json",
+                        "Accept": "application/json, text/event-stream",
+                        "X-Session-ID": self.session_id
+                    },
                     timeout=aiohttp.ClientTimeout(total=self.valves.MCP_TIMEOUT)
                 ) as response:
                     if response.status == 200:
@@ -187,7 +195,7 @@ class Pipeline:
         
         try:
             # 构建MCP JSON-RPC请求
-            mcp_url = f"{self.valves.MCP_SERVER_URL.rstrip('/')}/tools/call"
+            mcp_url = f"{self.valves.MCP_SERVER_URL.rstrip('/')}/mcp"
             
             # MCP JSON-RPC格式请求体
             jsonrpc_payload = {
@@ -202,7 +210,8 @@ class Pipeline:
             
             headers = {
                 "Content-Type": "application/json",
-                "Accept": "application/json"
+                "Accept": "application/json, text/event-stream",
+                "X-Session-ID": self.session_id
             }
             
             async with aiohttp.ClientSession() as session:
