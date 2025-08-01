@@ -14,7 +14,6 @@ import requests
 import asyncio
 import aiohttp
 import time
-import uuid
 from typing import List, Union, Generator, Iterator, Dict, Any, Optional, AsyncGenerator
 from pydantic import BaseModel
 import logging
@@ -70,8 +69,8 @@ class Pipeline:
         self.mcp_tools = {}
         self.tools_loaded = False
         
-        # 生成唯一的MCP会话ID
-        self.session_id = str(uuid.uuid4())
+        # MCP会话ID将在初始化时从服务器获取
+        self.session_id = None
         
         self.valves = self.Valves(
             **{
@@ -119,34 +118,161 @@ class Pipeline:
         print(f"PubChemPy MCP Chemical Pipeline V2关闭: {__name__}")
         print("🔚 Pipeline已关闭")
 
+    async def _initialize_mcp_session(self):
+        """初始化MCP会话并获取服务器分配的session ID"""
+        if not self.valves.MCP_SERVER_URL:
+            raise Exception("MCP服务器地址未配置")
+        
+        try:
+            mcp_url = f"{self.valves.MCP_SERVER_URL.strip().rstrip('/')}/mcp"
+            
+            # Step 1: 发送initialize请求（不带session ID）
+            initialize_request = {
+                "jsonrpc": "2.0",
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {
+                        "sampling": {},
+                        "roots": {"listChanged": True}
+                    },
+                    "clientInfo": {
+                        "name": "PubChemPy MCP Pipeline",
+                        "version": "2.0.0"
+                    }
+                },
+                "id": "init-1"
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    mcp_url,
+                    json=initialize_request,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Accept": "application/json, text/event-stream"
+                    },
+                    timeout=aiohttp.ClientTimeout(total=self.valves.MCP_TIMEOUT)
+                ) as response:
+                    if response.status == 200:
+                        # 检查响应头中的session ID
+                        server_session_id = response.headers.get("Mcp-Session-Id")
+                        if server_session_id:
+                            self.session_id = server_session_id
+                            logger.info(f"Got session ID from server: {self.session_id}")
+                        
+                        # 处理响应，可能是JSON或SSE流
+                        content_type = response.headers.get("Content-Type", "")
+                        if "text/event-stream" in content_type:
+                            # 处理SSE流
+                            init_response = None
+                            async for line in response.content:
+                                line_str = line.decode('utf-8').strip()
+                                if line_str.startswith('data: '):
+                                    try:
+                                        data = json.loads(line_str[6:])  # 移除 'data: ' 前缀
+                                        if data.get("id") == "init-1":  # 匹配我们的请求ID
+                                            init_response = data
+                                            break
+                                    except json.JSONDecodeError:
+                                        continue
+                        else:
+                            # 直接JSON响应
+                            init_response = await response.json()
+                        
+                        if not init_response:
+                            raise Exception("No initialize response received")
+                        
+                        if "error" in init_response:
+                            raise Exception(f"MCP initialize error: {init_response['error']}")
+                        
+                        # Step 2: 发送initialized通知
+                        initialized_notification = {
+                            "jsonrpc": "2.0",
+                            "method": "notifications/initialized"
+                        }
+                        
+                        headers = {
+                            "Content-Type": "application/json",
+                            "Accept": "application/json, text/event-stream"
+                        }
+                        if hasattr(self, 'session_id') and self.session_id:
+                            headers["Mcp-Session-Id"] = self.session_id
+                        
+                        async with session.post(
+                            mcp_url,
+                            json=initialized_notification,
+                            headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=self.valves.MCP_TIMEOUT)
+                        ) as notify_response:
+                            if notify_response.status not in [200, 202]:
+                                logger.warning(f"Initialized notification failed: {notify_response.status}")
+                        
+                        logger.info("MCP session initialized successfully")
+                    else:
+                        error_text = await response.text()
+                        raise Exception(f"Initialize failed - HTTP {response.status}: {error_text}")
+                        
+        except Exception as e:
+            logger.error(f"MCP session initialization failed: {e}")
+            raise
+
     async def _discover_mcp_tools(self):
         """通过MCP JSON-RPC协议发现服务器工具"""
         if not self.valves.MCP_SERVER_URL:
             raise Exception("MCP服务器地址未配置")
+        
+        # 首先初始化MCP会话
+        if not hasattr(self, '_session_initialized'):
+            await self._initialize_mcp_session()
+            self._session_initialized = True
         
         try:
             # 构建MCP JSON-RPC请求
             mcp_request = {
                 "jsonrpc": "2.0",
                 "method": "tools/list",
-                "id": 1
+                "id": "tools-list-1"
             }
             
-            mcp_url = f"{self.valves.MCP_SERVER_URL.rstrip('/')}/mcp"
+            mcp_url = f"{self.valves.MCP_SERVER_URL.strip().rstrip('/')}/mcp"
+            
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream"
+            }
+            if hasattr(self, 'session_id') and self.session_id:
+                headers["Mcp-Session-Id"] = self.session_id
             
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     mcp_url,
                     json=mcp_request,
-                    headers={
-                        "Content-Type": "application/json",
-                        "Accept": "application/json, text/event-stream",
-                        "X-Session-ID": self.session_id
-                    },
+                    headers=headers,
                     timeout=aiohttp.ClientTimeout(total=self.valves.MCP_TIMEOUT)
                 ) as response:
                     if response.status == 200:
-                        mcp_response = await response.json()
+                        # 处理响应，可能是JSON或SSE流
+                        content_type = response.headers.get("Content-Type", "")
+                        if "text/event-stream" in content_type:
+                            # 处理SSE流
+                            mcp_response = None
+                            async for line in response.content:
+                                line_str = line.decode('utf-8').strip()
+                                if line_str.startswith('data: '):
+                                    try:
+                                        data = json.loads(line_str[6:])  # 移除 'data: ' 前缀
+                                        if data.get("id") == "tools-list-1":  # 匹配我们的请求ID
+                                            mcp_response = data
+                                            break
+                                    except json.JSONDecodeError:
+                                        continue
+                        else:
+                            # 直接JSON响应
+                            mcp_response = await response.json()
+                        
+                        if not mcp_response:
+                            raise Exception("No tools/list response received")
                         
                         if "error" in mcp_response:
                             raise Exception(f"MCP error: {mcp_response['error']}")
@@ -195,7 +321,7 @@ class Pipeline:
         
         try:
             # 构建MCP JSON-RPC请求
-            mcp_url = f"{self.valves.MCP_SERVER_URL.rstrip('/')}/mcp"
+            mcp_url = f"{self.valves.MCP_SERVER_URL.strip().rstrip('/')}/mcp"
             
             # MCP JSON-RPC格式请求体
             jsonrpc_payload = {
@@ -210,9 +336,10 @@ class Pipeline:
             
             headers = {
                 "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-                "X-Session-ID": self.session_id
+                "Accept": "application/json, text/event-stream"
             }
+            if hasattr(self, 'session_id') and self.session_id:
+                headers["Mcp-Session-Id"] = self.session_id
             
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -222,7 +349,28 @@ class Pipeline:
                     timeout=aiohttp.ClientTimeout(total=self.valves.MCP_TIMEOUT)
                 ) as response:
                     if response.status == 200:
-                        result = await response.json()
+                        # 处理响应，可能是JSON或SSE流
+                        content_type = response.headers.get("Content-Type", "")
+                        if "text/event-stream" in content_type:
+                            # 处理SSE流
+                            result = None
+                            request_id = jsonrpc_payload["id"]
+                            async for line in response.content:
+                                line_str = line.decode('utf-8').strip()
+                                if line_str.startswith('data: '):
+                                    try:
+                                        data = json.loads(line_str[6:])  # 移除 'data: ' 前缀
+                                        if data.get("id") == request_id:  # 匹配我们的请求ID
+                                            result = data
+                                            break
+                                    except json.JSONDecodeError:
+                                        continue
+                        else:
+                            # 直接JSON响应
+                            result = await response.json()
+                        
+                        if not result:
+                            return {"error": "No response received"}
                         
                         # 处理MCP JSON-RPC响应
                         if "result" in result:
