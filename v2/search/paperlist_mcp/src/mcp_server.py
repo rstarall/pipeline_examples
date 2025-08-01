@@ -430,7 +430,7 @@ async def list_tags(request: Request) -> JSONResponse:
     """List all available tags from tools"""
     try:
         # Get all tools to extract tags
-        tools = mcp.get_tools()
+        tools = await mcp.get_tools() if asyncio.iscoroutinefunction(mcp.get_tools) else mcp.get_tools()
         
         tags = set()
         
@@ -466,7 +466,7 @@ async def get_tools_by_tag(request: Request) -> JSONResponse:
             )
         
         # Get all tools and filter by tag
-        all_tools = mcp.get_tools()
+        all_tools = await mcp.get_tools() if asyncio.iscoroutinefunction(mcp.get_tools) else mcp.get_tools()
         filtered_tools = []
         
         for tool in all_tools:
