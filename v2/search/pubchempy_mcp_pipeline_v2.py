@@ -88,7 +88,7 @@ class Pipeline:
                 "MAX_TOOL_CALLS": int(os.getenv("MAX_TOOL_CALLS", "5")),
                 
                 # MCP配置
-                "MCP_SERVER_URL": os.getenv("MCP_SERVER_URL", "http://localhost:8989"),
+                "MCP_SERVER_URL": os.getenv("MCP_SERVER_URL", "http://localhost:8990"),
                 "MCP_TAG": os.getenv("MCP_TAG", "search"),
                 "MCP_TIMEOUT": int(os.getenv("MCP_TIMEOUT", "30")),
             }
@@ -111,8 +111,17 @@ class Pipeline:
         try:
             await self._discover_mcp_tools()
             print(f"✅ 成功发现 {len(self.mcp_tools)} 个MCP工具")
+            if self.mcp_tools:
+                print("📋 可用工具列表:")
+                for tool_name, tool_info in self.mcp_tools.items():
+                    description = tool_info.get('description', '无描述')
+                    tags = ', '.join(tool_info.get('tags', []))
+                    print(f"  • {tool_name}: {description} (标签: {tags})")
+            else:
+                print(f"⚠️ 未发现任何标签为 '{self.valves.MCP_TAG}' 的工具")
         except Exception as e:
             print(f"❌ MCP工具发现失败: {e}")
+            print(f"🔧 请检查: \n• MCP服务器是否运行在 {self.valves.MCP_SERVER_URL}\n• 网络连接是否正常\n• 服务器是否支持标签 '{self.valves.MCP_TAG}'")
 
     async def on_shutdown(self):
         print(f"PubChemPy MCP Chemical Pipeline V2关闭: {__name__}")
@@ -236,6 +245,9 @@ class Pipeline:
             }
             
             mcp_url = f"{self.valves.MCP_SERVER_URL.strip().rstrip('/')}/mcp"
+            logger.info(f"MCP工具发现 - 连接URL: {mcp_url}")
+            logger.info(f"MCP工具发现 - 过滤标签: {self.valves.MCP_TAG}")
+            logger.info(f"MCP工具发现 - 超时设置: {self.valves.MCP_TIMEOUT}秒")
             
             headers = {
                 "Content-Type": "application/json",
@@ -243,6 +255,9 @@ class Pipeline:
             }
             if hasattr(self, 'session_id') and self.session_id:
                 headers["Mcp-Session-Id"] = self.session_id
+                logger.info(f"MCP工具发现 - 使用会话ID: {self.session_id}")
+            else:
+                logger.info("MCP工具发现 - 未使用会话ID")
             
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -278,13 +293,18 @@ class Pipeline:
                             raise Exception(f"MCP error: {mcp_response['error']}")
                         
                         tools = mcp_response.get("result", {}).get("tools", [])
+                        logger.info(f"MCP工具发现 - 服务器返回了 {len(tools)} 个工具")
                         
                         # 根据tag过滤工具并解析工具信息
+                        filtered_count = 0
                         for tool in tools:
                             tool_tags = tool.get("tags", [])
+                            tool_name = tool.get("name", "unknown")
+                            logger.info(f"MCP工具发现 - 检查工具 '{tool_name}', 标签: {tool_tags}")
+                            
                             # 只加载匹配指定tag的工具
                             if self.valves.MCP_TAG in tool_tags:
-                                tool_name = tool.get("name")
+                                filtered_count += 1
                                 if tool_name:
                                     self.mcp_tools[tool_name] = {
                                         "name": tool_name,
@@ -292,9 +312,12 @@ class Pipeline:
                                         "input_schema": tool.get("inputSchema", {}),
                                         "tags": tool_tags
                                     }
+                                    logger.info(f"MCP工具发现 - 已加载工具 '{tool_name}'")
+                            else:
+                                logger.info(f"MCP工具发现 - 跳过工具 '{tool_name}' (标签不匹配)")
                         
                         self.tools_loaded = True
-                        logger.info(f"Successfully discovered {len(self.mcp_tools)} MCP tools with tag '{self.valves.MCP_TAG}'")
+                        logger.info(f"MCP工具发现完成 - 总工具数: {len(tools)}, 匹配标签 '{self.valves.MCP_TAG}' 的工具: {filtered_count}, 最终加载: {len(self.mcp_tools)}")
                     else:
                         error_text = await response.text()
                         raise Exception(f"HTTP {response.status}: {error_text}")
@@ -633,6 +656,15 @@ TOOL_CALL:<工具名称>:<JSON参数>
         # 确保工具已加载
         if not self.tools_loaded:
             try:
+                # 显示MCP连接信息
+                server_info = f"🔗 连接MCP服务器: {self.valves.MCP_SERVER_URL}\n🏷️ 过滤标签: {self.valves.MCP_TAG}\n⏰ 超时时间: {self.valves.MCP_TIMEOUT}秒"
+                if stream_mode:
+                    for chunk in self._emit_processing(server_info, "mcp_discovery"):
+                        yield f'data: {json.dumps(chunk)}\n\n'
+                else:
+                    yield server_info + "\n"
+                
+                # 开始发现工具
                 if stream_mode:
                     for chunk in self._emit_processing("🔍 正在发现MCP工具...", "mcp_discovery"):
                         yield f'data: {json.dumps(chunk)}\n\n'
@@ -641,15 +673,48 @@ TOOL_CALL:<工具名称>:<JSON参数>
                 
                 await self._discover_mcp_tools()
                 
-                discovery_info = f"✅ 发现 {len(self.mcp_tools)} 个MCP工具: {', '.join(self.mcp_tools.keys())}"
-                if stream_mode:
-                    for chunk in self._emit_processing(discovery_info, "mcp_discovery"):
-                        yield f'data: {json.dumps(chunk)}\n\n'
+                # 显示详细的工具发现结果
+                if self.mcp_tools:
+                    discovery_info = f"✅ 成功发现 {len(self.mcp_tools)} 个MCP工具:"
+                    if stream_mode:
+                        for chunk in self._emit_processing(discovery_info, "mcp_discovery"):
+                            yield f'data: {json.dumps(chunk)}\n\n'
+                    else:
+                        yield discovery_info + "\n"
+                    
+                    # 显示每个工具的详细信息
+                    for tool_name, tool_info in self.mcp_tools.items():
+                        tool_detail = f"""
+📋 工具: {tool_name}
+📝 描述: {tool_info.get('description', '无描述')}
+🏷️ 标签: {', '.join(tool_info.get('tags', []))}"""
+                        
+                        # 显示参数信息
+                        input_schema = tool_info.get('input_schema', {})
+                        if input_schema and 'properties' in input_schema:
+                            tool_detail += "\n📊 参数:"
+                            for param_name, param_info in input_schema['properties'].items():
+                                param_type = param_info.get('type', 'unknown')
+                                param_desc = param_info.get('description', '无描述')
+                                param_required = param_name in input_schema.get('required', [])
+                                required_str = " (必需)" if param_required else " (可选)"
+                                tool_detail += f"\n  • {param_name} ({param_type}){required_str}: {param_desc}"
+                        
+                        if stream_mode:
+                            for chunk in self._emit_processing(tool_detail, "mcp_discovery"):
+                                yield f'data: {json.dumps(chunk)}\n\n'
+                        else:
+                            yield tool_detail + "\n"
                 else:
-                    yield discovery_info + "\n"
+                    no_tools_msg = "⚠️ 未发现任何匹配的MCP工具，请检查MCP服务器和标签配置"
+                    if stream_mode:
+                        for chunk in self._emit_processing(no_tools_msg, "mcp_discovery"):
+                            yield f'data: {json.dumps(chunk)}\n\n'
+                    else:
+                        yield no_tools_msg + "\n"
                     
             except Exception as e:
-                error_msg = f"❌ MCP工具发现失败: {str(e)}"
+                error_msg = f"❌ MCP工具发现失败: {str(e)}\n🔧 请检查: \n• MCP服务器是否运行在 {self.valves.MCP_SERVER_URL}\n• 网络连接是否正常\n• 服务器是否支持标签 '{self.valves.MCP_TAG}'"
                 if stream_mode:
                     for chunk in self._emit_processing(error_msg, "mcp_discovery"):
                         yield f'data: {json.dumps(chunk)}\n\n'
@@ -730,19 +795,62 @@ TOOL_CALL:<工具名称>:<JSON参数>
                     else:
                         yield call_info + "\n"
                     
+                    # 显示工具详细信息
+                    tool_detail_info = self.mcp_tools.get(tool_name, {})
+                    tool_desc = tool_detail_info.get('description', '无描述')
+                    tool_tags = ', '.join(tool_detail_info.get('tags', []))
+                    
+                    tool_context = f"""📋 工具详情:
+📝 描述: {tool_desc}
+🏷️ 标签: {tool_tags}
+🔗 服务器: {self.valves.MCP_SERVER_URL}"""
+                    
+                    if stream_mode:
+                        for chunk in self._emit_processing(tool_context, "tool_calling"):
+                            yield f'data: {json.dumps(chunk)}\n\n'
+                    else:
+                        yield tool_context + "\n"
+                    
                     # 显示工具调用参数
-                    tool_info = f"📝 工具调用参数: {json.dumps(tool_args, ensure_ascii=False)}"
+                    tool_info = f"📊 调用参数: {json.dumps(tool_args, ensure_ascii=False, indent=2)}"
                     if stream_mode:
                         for chunk in self._emit_processing(tool_info, "tool_calling"):
                             yield f'data: {json.dumps(chunk)}\n\n'
                     else:
                         yield tool_info + "\n"
                     
+                    # 验证参数
+                    input_schema = tool_detail_info.get('input_schema', {})
+                    if input_schema:
+                        validation_info = "✅ 参数验证:"
+                        required_params = input_schema.get('required', [])
+                        properties = input_schema.get('properties', {})
+                        
+                        for param_name, param_value in tool_args.items():
+                            if param_name in properties:
+                                param_type = properties[param_name].get('type', 'unknown')
+                                is_required = param_name in required_params
+                                status = "✓" if is_required else "◦"
+                                validation_info += f"\n  {status} {param_name}: {param_value} ({param_type})"
+                        
+                        if stream_mode:
+                            for chunk in self._emit_processing(validation_info, "tool_calling"):
+                                yield f'data: {json.dumps(chunk)}\n\n'
+                        else:
+                            yield validation_info + "\n"
+                    
                     # 调用MCP工具
                     tool_result = await self._execute_mcp_tool(tool_name, tool_args)
                     
                     # 显示工具调用结果
-                    result_info = f"✅ 工具调用结果:\n{tool_result[:500]}{'...' if len(tool_result) > 500 else ''}"
+                    if isinstance(tool_result, str) and tool_result.startswith('{"error"'):
+                        # 错误结果
+                        result_info = f"❌ 工具调用失败:\n{tool_result}"
+                    else:
+                        # 成功结果
+                        result_preview = tool_result[:500] if len(tool_result) > 500 else tool_result
+                        result_info = f"✅ 工具调用成功:\n📏 结果长度: {len(tool_result)} 字符\n📄 结果预览:\n{result_preview}{'...' if len(tool_result) > 500 else ''}"
+                    
                     if stream_mode:
                         for chunk in self._emit_processing(result_info, "tool_calling"):
                             yield f'data: {json.dumps(chunk)}\n\n'
