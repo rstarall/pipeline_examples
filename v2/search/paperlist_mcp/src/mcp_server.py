@@ -186,7 +186,7 @@ async def search_papers(
     include_abstracts: bool = True,
     max_concurrent: int = 10,
     ctx: Context = None
-) -> str:
+) -> dict:
     """
     Search for academic papers by query string.
     
@@ -200,7 +200,7 @@ async def search_papers(
         max_concurrent: Maximum concurrent API calls for fetching details
     
     Returns:
-        Formatted search results with paper information and abstracts
+        JSON response with paper information and abstracts
     """
     if ctx:
         await ctx.info(f"Searching for papers: {query}")
@@ -225,7 +225,14 @@ async def search_papers(
         
         papers = search_results.get("page", [])
         if not papers:
-            return f"📄 No papers found for query: {query}"
+            return {
+                "success": False,
+                "query": query,
+                "total_count": 0,
+                "results": [],
+                "error": "No papers found",
+                "source": "paperlist"
+            }
         
         total_count = search_results.get("count", len(papers))
         
@@ -259,64 +266,60 @@ async def search_papers(
             results=paper_infos
         )
         
-        # Format response
-        response_text = f"📄 Academic Paper Search Results\n"
-        response_text += f"Query: {response.query}\n"
-        response_text += f"Found: {len(response.results)} papers (Total: {response.total_count})\n"
-        response_text += f"Source: {response.source}\n\n"
-        
-        for i, paper in enumerate(response.results, 1):
-            response_text += f"--- Paper {i} ---\n"
-            
-            if paper.title:
-                response_text += f"Title: {paper.title}\n"
-            if paper.authors:
-                response_text += f"Authors: {paper.authors}\n"
-            if paper.year:
-                response_text += f"Year: {paper.year}\n"
-            if paper.citations is not None:
-                response_text += f"Citations: {paper.citations}\n"
-            if paper.venue:
-                response_text += f"Venue: {paper.venue}\n"
-            
-            # Abstract
-            if paper.abstract:
-                abstract_preview = paper.abstract[:300] + "..." if len(paper.abstract) > 300 else paper.abstract
-                response_text += f"Abstract: {abstract_preview}\n"
-            
-            # External links
-            links = []
-            if paper.arxiv_id:
-                links.append(f"ArXiv: https://arxiv.org/abs/{paper.arxiv_id}")
-                if paper.arxiv_pdf_url:
-                    links.append(f"PDF: {paper.arxiv_pdf_url}")
-            if paper.doi:
-                links.append(f"DOI: https://doi.org/{paper.doi}")
-            if paper.semantic_scholar_id:
-                links.append(f"Semantic Scholar: https://www.semanticscholar.org/paper/{paper.semantic_scholar_id}")
-            
-            if links:
-                response_text += f"Links: {' | '.join(links)}\n"
-            
-            response_text += "\n"
+        # Convert PaperInfo objects to dictionaries for JSON serialization
+        results_dict = []
+        for paper in response.results:
+            paper_dict = {
+                "id": paper.id,
+                "title": paper.title,
+                "authors": paper.authors,
+                "year": paper.year,
+                "citations": paper.citations,
+                "abstract": paper.abstract,
+                "doi": paper.doi,
+                "arxiv_id": paper.arxiv_id,
+                "arxiv_pdf_url": paper.arxiv_pdf_url,
+                "semantic_scholar_id": paper.semantic_scholar_id,
+                "dblp_id": paper.dblp_id,
+                "pubmed_id": paper.pubmed_id,
+                "pmc_id": paper.pmc_id,
+                "venue": paper.venue,
+                "topic": paper.topic
+            }
+            results_dict.append(paper_dict)
         
         if ctx:
             await ctx.info(f"Successfully returned {len(response.results)} papers")
         
-        return response_text
+        # Return JSON response
+        return {
+            "success": response.success,
+            "query": response.query,
+            "total_count": response.total_count,
+            "results": results_dict,
+            "source": response.source,
+            "error": None
+        }
         
     except Exception as e:
-        error_msg = f"❌ Paper Search Error: {str(e)}"
+        error_msg = f"Paper Search Error: {str(e)}"
         if ctx:
             await ctx.error(error_msg)
         logger.error(f"Paper search failed: {str(e)}")
-        return error_msg
+        return {
+            "success": False,
+            "query": query,
+            "total_count": 0,
+            "results": [],
+            "source": "paperlist",
+            "error": error_msg
+        }
 
 @mcp.tool(tags={"search", "academic", "public"})
 async def get_paper_details(
     paper_id: int,
     ctx: Context = None
-) -> str:
+) -> dict:
     """
     Get detailed information for a specific paper by ID.
     
@@ -324,7 +327,7 @@ async def get_paper_details(
         paper_id: Paperlist paper ID
     
     Returns:
-        Formatted paper details including full abstract
+        JSON response with paper details including full abstract
     """
     if ctx:
         await ctx.info(f"Fetching details for paper ID: {paper_id}")
@@ -336,54 +339,56 @@ async def get_paper_details(
         detail = await api.get_paper_detail(paper_id)
         
         if not detail:
-            return f"❌ No details found for paper ID: {paper_id}"
+            return {
+                "success": False,
+                "paper_id": paper_id,
+                "error": "No details found for this paper ID",
+                "source": "paperlist"
+            }
         
-        # Format response
-        response_text = f"📄 Paper Details\n"
-        response_text += f"Paper ID: {paper_id}\n\n"
-        
-        if detail.get("title"):
-            response_text += f"Title: {detail['title']}\n"
-        if detail.get("authors"):
-            response_text += f"Authors: {detail['authors']}\n"
-        if detail.get("year"):
-            response_text += f"Year: {detail['year']}\n"
-        if detail.get("venue"):
-            response_text += f"Venue: {detail['venue']}\n"
-        if detail.get("abstr"):
-            response_text += f"\nAbstract:\n{detail['abstr']}\n"
-        
-        # External IDs
-        external_ids = []
-        if detail.get("id_arxiv"):
-            external_ids.append(f"ArXiv: {detail['id_arxiv']}")
-        if detail.get("id_doi"):
-            external_ids.append(f"DOI: {detail['id_doi']}")
-        if detail.get("id_s2"):
-            external_ids.append(f"Semantic Scholar: {detail['id_s2']}")
-        if detail.get("id_dblp"):
-            external_ids.append(f"DBLP: {detail['id_dblp']}")
-        if detail.get("id_pm"):
-            external_ids.append(f"PubMed: {detail['id_pm']}")
-        if detail.get("id_pmc"):
-            external_ids.append(f"PMC: {detail['id_pmc']}")
-        
-        if external_ids:
-            response_text += f"\nExternal IDs:\n"
-            for ext_id in external_ids:
-                response_text += f"  {ext_id}\n"
+        # Create paper detail response
+        paper_detail = {
+            "id": paper_id,
+            "title": detail.get("title"),
+            "authors": detail.get("authors"),
+            "year": detail.get("year"),
+            "venue": detail.get("venue"),
+            "abstract": detail.get("abstr"),
+            "citations": detail.get("cits_n"),
+            "doi": detail.get("id_doi"),
+            "arxiv_id": detail.get("id_arxiv"),
+            "arxiv_pdf_url": f"https://arxiv.org/pdf/{detail.get('id_arxiv')}" if detail.get("id_arxiv") else None,
+            "semantic_scholar_id": detail.get("id_s2"),
+            "dblp_id": detail.get("id_dblp"),
+            "pubmed_id": detail.get("id_pm"),
+            "pmc_id": detail.get("id_pmc"),
+            "topic": detail.get("topic")
+        }
         
         if ctx:
             await ctx.info("Successfully retrieved paper details")
         
-        return response_text
+        # Return JSON response
+        return {
+            "success": True,
+            "paper_id": paper_id,
+            "result": paper_detail,
+            "source": "paperlist",
+            "error": None
+        }
         
     except Exception as e:
-        error_msg = f"❌ Error fetching paper details: {str(e)}"
+        error_msg = f"Error fetching paper details: {str(e)}"
         if ctx:
             await ctx.error(error_msg)
         logger.error(f"Paper detail fetch failed: {str(e)}")
-        return error_msg
+        return {
+            "success": False,
+            "paper_id": paper_id,
+            "result": None,
+            "source": "paperlist",
+            "error": error_msg
+        }
 
 
 

@@ -74,7 +74,7 @@ def extract_compound_properties(compound) -> ChemicalInfo:
             iupac_name=getattr(compound, 'iupac_name', None),
             molecular_formula=getattr(compound, 'molecular_formula', None),
             molecular_weight=getattr(compound, 'molecular_weight', None),
-            smiles=getattr(compound, 'canonical_smiles', None),
+            smiles=getattr(compound, 'canonical_smiles', None) or getattr(compound, 'smiles', None),
             inchi=getattr(compound, 'inchi', None),
             inchi_key=getattr(compound, 'inchikey', None),
             synonyms=synonyms,
@@ -86,7 +86,15 @@ def extract_compound_properties(compound) -> ChemicalInfo:
                 'h_bond_acceptor_count': getattr(compound, 'h_bond_acceptor_count', None),
                 'h_bond_donor_count': getattr(compound, 'h_bond_donor_count', None),
                 'topological_polar_surface_area': getattr(compound, 'tpsa', None),
-                'xlogp': getattr(compound, 'xlogp', None)
+                'xlogp': getattr(compound, 'xlogp', None),
+                'complexity': getattr(compound, 'complexity', None),
+                'charge': getattr(compound, 'charge', None),
+                'covalent_unit_count': getattr(compound, 'covalent_unit_count', None),
+                'isotope_atom_count': getattr(compound, 'isotope_atom_count', None),
+                'defined_atom_stereo_count': getattr(compound, 'defined_atom_stereo_count', None),
+                'undefined_atom_stereo_count': getattr(compound, 'undefined_atom_stereo_count', None),
+                'defined_bond_stereo_count': getattr(compound, 'defined_bond_stereo_count', None),
+                'undefined_bond_stereo_count': getattr(compound, 'undefined_bond_stereo_count', None)
             }
         )
     except Exception as e:
@@ -195,7 +203,7 @@ async def search_chemical(
     search_type: str = "formula",
     use_fallback: bool = False,
     ctx: Context = None
-) -> str:
+) -> dict:
     """
     Search for chemical compounds by name, molecular formula, or SMILES string.
     
@@ -205,7 +213,7 @@ async def search_chemical(
         use_fallback: Use direct PubChem API instead of pubchempy library
     
     Returns:
-        Formatted search results or error message
+        JSON response with chemical information
     """
     if ctx:
         await ctx.info(f"Searching for chemical: {query}")
@@ -261,67 +269,47 @@ async def search_chemical(
             source=source
         )
         
-        # Format the response
-        if response.success and response.results:
-            # Create formatted text response
-            response_text = f"🧪 Chemical Search Results\n"
-            response_text += f"Query: {response.query}\n"
-            response_text += f"Search Type: {response.search_type}\n"
-            response_text += f"Source: {response.source}\n"
-            response_text += f"Found {len(response.results)} compound(s)\n\n"
-            
-            for i, compound in enumerate(response.results, 1):
-                response_text += f"--- Compound {i} ---\n"
-                
-                if compound.cid:
-                    response_text += f"PubChem CID: {compound.cid}\n"
-                if compound.iupac_name:
-                    response_text += f"IUPAC Name: {compound.iupac_name}\n"
-                if compound.molecular_formula:
-                    response_text += f"Molecular Formula: {compound.molecular_formula}\n"
-                if compound.molecular_weight:
-                    response_text += f"Molecular Weight: {compound.molecular_weight:.2f} g/mol\n"
-                if compound.smiles:
-                    response_text += f"SMILES: {compound.smiles}\n"
-                if compound.inchi_key:
-                    response_text += f"InChI Key: {compound.inchi_key}\n"
-                
-                if compound.synonyms:
-                    synonyms_text = ", ".join(compound.synonyms[:5])
-                    if len(compound.synonyms) > 5:
-                        synonyms_text += f" (and {len(compound.synonyms) - 5} more)"
-                    response_text += f"Synonyms: {synonyms_text}\n"
-                
-                if compound.properties:
-                    response_text += "Properties:\n"
-                    for key, value in compound.properties.items():
-                        if value is not None:
-                            key_formatted = key.replace('_', ' ').title()
-                            response_text += f"  {key_formatted}: {value}\n"
-                
-                response_text += "\n"
-            
-            return response_text
+        # Convert ChemicalInfo objects to dictionaries for JSON serialization
+        results_dict = []
+        for compound in response.results:
+            compound_dict = {
+                "cid": compound.cid,
+                "iupac_name": compound.iupac_name,
+                "molecular_formula": compound.molecular_formula,
+                "molecular_weight": compound.molecular_weight,
+                "smiles": compound.smiles,
+                "inchi": compound.inchi,
+                "inchi_key": compound.inchi_key,
+                "synonyms": compound.synonyms,
+                "properties": compound.properties
+            }
+            results_dict.append(compound_dict)
         
-        else:
-            # No results or error
-            error_text = f"❌ Chemical Search Failed\n"
-            error_text += f"Query: {response.query}\n"
-            error_text += f"Search Type: {response.search_type}\n"
-            
-            if response.error:
-                error_text += f"Error: {response.error}\n"
-            else:
-                error_text += "No compounds found matching the query.\n"
-            
-            return error_text
+        # Return JSON response
+        return {
+            "success": response.success,
+            "query": response.query,
+            "search_type": response.search_type,
+            "results": results_dict,
+            "source": response.source,
+            "error": response.error,
+            "total_count": len(results_dict)
+        }
             
     except Exception as e:
-        error_msg = f"❌ Search Error: {str(e)}"
+        error_msg = f"Search Error: {str(e)}"
         if ctx:
             await ctx.error(error_msg)
         logger.error(f"Tool execution failed: {str(e)}")
-        return error_msg
+        return {
+            "success": False,
+            "query": query,
+            "search_type": search_type,
+            "results": [],
+            "source": "unknown",
+            "error": error_msg,
+            "total_count": 0
+        }
 
 
 
