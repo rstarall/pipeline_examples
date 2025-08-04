@@ -2,10 +2,11 @@
 PubChemPy MCP Pipeline V2 - 基于MCP协议的化学信息查询管道
 
 功能特性:
-1. 通过MCP JSON-RPC协议的tools/list方法动态发现工具，根据tag进行过滤
+1. 通过MCP JSON-RPC协议动态发现服务器工具
 2. 使用MCP JSON-RPC协议进行工具调用
-3. 支持流式输出和多轮工具调用
-4. 智能工具选择和参数生成
+3. 支持流式输出和智能工具选择
+4. AI决策驱动的单次工具调用模式
+5. 工具调用解析错误时自动重试机制
 """
 
 import os
@@ -52,8 +53,8 @@ class Pipeline:
         
         # MCP配置
         MCP_SERVER_URL: str
-        MCP_TAG: str
         MCP_TIMEOUT: int
+        MCP_TOOLS_EXPIRE_HOURS: int
 
     def __init__(self):
         self.name = "PubChemPy MCP Chemical Pipeline V2"
@@ -68,6 +69,7 @@ class Pipeline:
         # MCP工具缓存
         self.mcp_tools = {}
         self.tools_loaded = False
+        self.tools_loaded_time = None  # 记录工具加载时间
         
         # MCP会话ID将在初始化时从服务器获取
         self.session_id = None
@@ -85,12 +87,12 @@ class Pipeline:
                 # Pipeline配置
                 "ENABLE_STREAMING": os.getenv("ENABLE_STREAMING", "true").lower() == "true",
                 "DEBUG_MODE": os.getenv("DEBUG_MODE", "false").lower() == "true",
-                "MAX_TOOL_CALLS": int(os.getenv("MAX_TOOL_CALLS", "5")),
+                "MAX_TOOL_CALLS": int(os.getenv("MAX_TOOL_CALLS", "3")),
                 
                 # MCP配置
                 "MCP_SERVER_URL": os.getenv("MCP_SERVER_URL", "http://localhost:8989"),
-                "MCP_TAG": os.getenv("MCP_TAG", "search"),
                 "MCP_TIMEOUT": int(os.getenv("MCP_TIMEOUT", "30")),
+                "MCP_TOOLS_EXPIRE_HOURS": int(os.getenv("MCP_TOOLS_EXPIRE_HOURS", "12")),
             }
         )
 
@@ -103,22 +105,17 @@ class Pipeline:
         
         # 验证MCP服务器地址
         print(f"🔗 MCP服务器地址: {self.valves.MCP_SERVER_URL}")
-        print(f"🏷️ MCP标签: {self.valves.MCP_TAG}")
+        print(f"⏰ 工具过期时间: {self.valves.MCP_TOOLS_EXPIRE_HOURS} 小时")
         if not self.valves.MCP_SERVER_URL:
             print("❌ 缺少MCP服务器地址，请设置MCP_SERVER_URL环境变量")
         
-        # 发现MCP工具
-        try:
-            await self._discover_mcp_tools()
-            print(f"✅ 成功发现 {len(self.mcp_tools)} 个MCP工具")
-        except Exception as e:
-            print(f"❌ MCP工具发现失败: {e}")
+        print("🔧 MCP工具将在首次使用时自动发现")
 
     async def on_shutdown(self):
         print(f"PubChemPy MCP Chemical Pipeline V2关闭: {__name__}")
         print("🔚 Pipeline已关闭")
 
-    async def _initialize_mcp_session(self):
+    async def _initialize_mcp_session(self, stream_mode: bool = False) -> AsyncGenerator[str, None]:
         """初始化MCP会话并获取服务器分配的session ID"""
         if not self.valves.MCP_SERVER_URL:
             raise Exception("MCP服务器地址未配置")
@@ -159,10 +156,10 @@ class Pipeline:
                         server_session_id = response.headers.get("Mcp-Session-Id")
                         if server_session_id:
                             self.session_id = server_session_id
-                            logger.info(f"Got session ID from server: {self.session_id}")
                         
                         # 处理响应，可能是JSON或SSE流
                         content_type = response.headers.get("Content-Type", "")
+                        
                         if "text/event-stream" in content_type:
                             # 处理SSE流
                             init_response = None
@@ -206,25 +203,43 @@ class Pipeline:
                             timeout=aiohttp.ClientTimeout(total=self.valves.MCP_TIMEOUT)
                         ) as notify_response:
                             if notify_response.status not in [200, 202]:
-                                logger.warning(f"Initialized notification failed: {notify_response.status}")
+                                pass  # 忽略initialized通知失败
                         
-                        logger.info("MCP session initialized successfully")
+                        init_msg = "🔧 MCP会话初始化完成"
+                        if stream_mode:
+                            for chunk in self._emit_processing(init_msg, "mcp_discovery"):
+                                yield f'data: {json.dumps(chunk)}\n\n'
+                        else:
+                            yield init_msg + "\n"
                     else:
                         error_text = await response.text()
                         raise Exception(f"Initialize failed - HTTP {response.status}: {error_text}")
                         
         except Exception as e:
-            logger.error(f"MCP session initialization failed: {e}")
+            error_msg = f"❌ MCP会话初始化失败: {e}"
+            if stream_mode:
+                for chunk in self._emit_processing(error_msg, "mcp_discovery"):
+                    yield f'data: {json.dumps(chunk)}\n\n'
+            else:
+                yield error_msg + "\n"
             raise
 
-    async def _discover_mcp_tools(self):
+    async def _discover_mcp_tools(self, stream_mode: bool = False) -> AsyncGenerator[str, None]:
         """通过MCP JSON-RPC协议发现服务器工具"""
         if not self.valves.MCP_SERVER_URL:
             raise Exception("MCP服务器地址未配置")
         
+        start_msg = f"🔍 正在发现MCP工具..."
+        if stream_mode:
+            for chunk in self._emit_processing(start_msg, "mcp_discovery"):
+                yield f'data: {json.dumps(chunk)}\n\n'
+        else:
+            yield start_msg + "\n"
+        
         # 首先初始化MCP会话
         if not hasattr(self, '_session_initialized'):
-            await self._initialize_mcp_session()
+            async for init_output in self._initialize_mcp_session(stream_mode):
+                yield init_output
             self._session_initialized = True
         
         try:
@@ -254,6 +269,7 @@ class Pipeline:
                     if response.status == 200:
                         # 处理响应，可能是JSON或SSE流
                         content_type = response.headers.get("Content-Type", "")
+                        
                         if "text/event-stream" in content_type:
                             # 处理SSE流
                             mcp_response = None
@@ -279,42 +295,95 @@ class Pipeline:
                         
                         tools = mcp_response.get("result", {}).get("tools", [])
                         
-                        # 根据tag过滤工具并解析工具信息
+                        # 加载所有工具（不再通过tags过滤）
                         for tool in tools:
-                            tool_tags = tool.get("tags", [])
-                            # 只加载匹配指定tag的工具
-                            if self.valves.MCP_TAG in tool_tags:
-                                tool_name = tool.get("name")
-                                if tool_name:
-                                    self.mcp_tools[tool_name] = {
-                                        "name": tool_name,
-                                        "description": tool.get("description", ""),
-                                        "input_schema": tool.get("inputSchema", {}),
-                                        "tags": tool_tags
-                                    }
+                            tool_name = tool.get("name")
+                            if tool_name:
+                                self.mcp_tools[tool_name] = {
+                                    "name": tool_name,
+                                    "description": tool.get("description", ""),
+                                    "input_schema": tool.get("inputSchema", {})
+                                }
                         
                         self.tools_loaded = True
-                        logger.info(f"Successfully discovered {len(self.mcp_tools)} MCP tools with tag '{self.valves.MCP_TAG}'")
+                        self.tools_loaded_time = time.time()  # 记录工具加载时间
+                        
+                        final_msg = f"✅ 发现 {len(self.mcp_tools)} 个MCP工具"
+                        if len(self.mcp_tools) > 0:
+                            final_msg += f": {', '.join(self.mcp_tools.keys())}"
+                        
+                        if stream_mode:
+                            for chunk in self._emit_processing(final_msg, "mcp_discovery"):
+                                yield f'data: {json.dumps(chunk)}\n\n'
+                        else:
+                            yield final_msg + "\n"
+                        
                     else:
                         error_text = await response.text()
                         raise Exception(f"HTTP {response.status}: {error_text}")
                         
         except Exception as e:
-            logger.error(f"MCP tool discovery failed: {e}")
+            error_msg = f"❌ MCP工具发现失败: {e}"
+            if stream_mode:
+                for chunk in self._emit_processing(error_msg, "mcp_discovery"):
+                    yield f'data: {json.dumps(chunk)}\n\n'
+            else:
+                yield error_msg + "\n"
             raise
 
+    def _are_tools_expired(self) -> bool:
+        """检查MCP工具是否已过期"""
+        if not self.tools_loaded or self.tools_loaded_time is None:
+            return True
+        
+        current_time = time.time()
+        expire_seconds = self.valves.MCP_TOOLS_EXPIRE_HOURS * 3600  # 转换为秒
+        return (current_time - self.tools_loaded_time) > expire_seconds
 
+    async def _ensure_tools_loaded(self, stream_mode: bool = False) -> AsyncGenerator[str, None]:
+        """确保MCP工具已加载且未过期"""
+        need_reload = False
+        reason = ""
+        
+        if not self.tools_loaded:
+            need_reload = True
+            reason = "工具未加载"
+        elif self._are_tools_expired():
+            need_reload = True
+            expired_hours = (time.time() - self.tools_loaded_time) / 3600
+            reason = f"工具已过期 ({expired_hours:.1f} 小时前加载)"
+        
+        if need_reload:
+            reload_msg = f"🔄 {reason}，正在重新发现MCP工具..."
+            if stream_mode:
+                for chunk in self._emit_processing(reload_msg, "mcp_discovery"):
+                    yield f'data: {json.dumps(chunk)}\n\n'
+            else:
+                yield reload_msg + "\n"
+            
+            # 清除旧的工具和会话状态
+            self.mcp_tools = {}
+            self.tools_loaded = False
+            self.tools_loaded_time = None
+            if hasattr(self, '_session_initialized'):
+                delattr(self, '_session_initialized')
+            self.session_id = None
+            
+            async for discovery_output in self._discover_mcp_tools(stream_mode):
+                yield discovery_output
 
     async def _call_mcp_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """使用MCP JSON-RPC协议调用工具"""
         if not self.valves.MCP_SERVER_URL:
             return {"error": "MCP服务器地址未配置"}
         
-        if not self.tools_loaded:
+        if not self.tools_loaded or self._are_tools_expired():
             try:
-                await self._discover_mcp_tools()
+                async for output in self._ensure_tools_loaded(stream_mode=False):
+                    # Silently consume the debug output in this context
+                    pass
             except Exception as e:
-                return {"error": f"工具发现失败: {str(e)}"}
+                return {"error": f"工具加载失败: {str(e)}"}
         
         if tool_name not in self.mcp_tools:
             return {"error": f"工具 '{tool_name}' 不可用"}
@@ -584,7 +653,6 @@ class Pipeline:
                 base_prompt += f"""
 工具名称: {tool_name}
 描述: {tool_info.get('description', '无描述')}
-标签: {', '.join(tool_info.get('tags', []))}
 """
                 
                 # 添加输入参数信息
@@ -630,32 +698,18 @@ TOOL_CALL:<工具名称>:<JSON参数>
     async def _process_user_message(self, user_message: str, messages: List[dict], stream_mode: bool) -> AsyncGenerator[str, None]:
         """处理用户消息，支持多轮MCP工具调用"""
         
-        # 确保工具已加载
-        if not self.tools_loaded:
-            try:
-                if stream_mode:
-                    for chunk in self._emit_processing("🔍 正在发现MCP工具...", "mcp_discovery"):
-                        yield f'data: {json.dumps(chunk)}\n\n'
-                else:
-                    yield "🔍 正在发现MCP工具...\n"
-                
-                await self._discover_mcp_tools()
-                
-                discovery_info = f"✅ 发现 {len(self.mcp_tools)} 个MCP工具: {', '.join(self.mcp_tools.keys())}"
-                if stream_mode:
-                    for chunk in self._emit_processing(discovery_info, "mcp_discovery"):
-                        yield f'data: {json.dumps(chunk)}\n\n'
-                else:
-                    yield discovery_info + "\n"
-                    
-            except Exception as e:
-                error_msg = f"❌ MCP工具发现失败: {str(e)}"
-                if stream_mode:
-                    for chunk in self._emit_processing(error_msg, "mcp_discovery"):
-                        yield f'data: {json.dumps(chunk)}\n\n'
-                else:
-                    yield error_msg + "\n"
-                return
+        # 确保工具已加载且未过期
+        try:
+            async for tools_output in self._ensure_tools_loaded(stream_mode):
+                yield tools_output
+        except Exception as e:
+            error_msg = f"❌ MCP工具加载失败: {str(e)}"
+            if stream_mode:
+                for chunk in self._emit_processing(error_msg, "mcp_discovery"):
+                    yield f'data: {json.dumps(chunk)}\n\n'
+            else:
+                yield error_msg + "\n"
+            return
         
         # 获取系统提示词
         system_prompt = self._get_system_prompt()
@@ -688,20 +742,26 @@ TOOL_CALL:<工具名称>:<JSON参数>
 请根据上下文和当前问题，决定是否需要调用MCP工具。如果需要，请按照指定格式回复工具调用。
 回答要忠于上下文、当前问题、工具返回的信息。"""
         
-        tool_call_count = 0
-        collected_tool_results = []
+        # 显示AI决策进度
+        decision_msg = "🤔 正在分析用户问题，决定是否需要调用工具..."
+        if stream_mode:
+            for chunk in self._emit_processing(decision_msg, "tool_calling"):
+                yield f'data: {json.dumps(chunk)}\n\n'
+        else:
+            yield decision_msg + "\n"
         
-        while tool_call_count < self.valves.MAX_TOOL_CALLS:
-            # 获取AI响应
+        # 获取AI响应，如果解析失败则重试
+        tool_name = None
+        tool_args = None
+        ai_response = None
+        
+        for retry_count in range(self.valves.MAX_TOOL_CALLS):
             ai_response = self._call_openai_api(system_prompt, full_user_prompt)
             
-            # 检查是否需要调用工具 - 支持通用格式 TOOL_CALL:<工具名称>:<JSON参数>
+            # 检查是否需要调用工具
             if ai_response.startswith("TOOL_CALL:"):
-                tool_call_count += 1
-                
-                # 解析工具调用
                 try:
-                    # 去除前缀并解析
+                    # 解析工具调用
                     tool_call_str = ai_response.replace("TOOL_CALL:", "", 1)
                     
                     # 找到第一个冒号分隔工具名称和参数
@@ -714,82 +774,83 @@ TOOL_CALL:<工具名称>:<JSON参数>
                     
                     # 验证工具是否存在
                     if tool_name not in self.mcp_tools:
-                        error_msg = f"工具 '{tool_name}' 不存在"
-                        if stream_mode:
-                            for chunk in self._emit_processing(f"❌ {error_msg}", "tool_calling"):
-                                yield f'data: {json.dumps(chunk)}\n\n'
-                        else:
-                            yield f"❌ {error_msg}\n"
-                        break
+                        raise ValueError(f"工具 '{tool_name}' 不存在")
                     
-                    # 显示工具调用信息
-                    call_info = f"🔧 正在调用MCP工具 '{tool_name}'（第{tool_call_count}次）..."
-                    if stream_mode:
-                        for chunk in self._emit_processing(call_info, "tool_calling"):
-                            yield f'data: {json.dumps(chunk)}\n\n'
-                    else:
-                        yield call_info + "\n"
-                    
-                    # 显示工具调用参数
-                    tool_info = f"📝 工具调用参数: {json.dumps(tool_args, ensure_ascii=False)}"
-                    if stream_mode:
-                        for chunk in self._emit_processing(tool_info, "tool_calling"):
-                            yield f'data: {json.dumps(chunk)}\n\n'
-                    else:
-                        yield tool_info + "\n"
-                    
-                    # 调用MCP工具
-                    tool_result = await self._execute_mcp_tool(tool_name, tool_args)
-                    
-                    # 显示工具调用结果
-                    result_info = f"✅ 工具调用结果:\n{tool_result[:500]}{'...' if len(tool_result) > 500 else ''}"
-                    if stream_mode:
-                        for chunk in self._emit_processing(result_info, "tool_calling"):
-                            yield f'data: {json.dumps(chunk)}\n\n'
-                    else:
-                        yield result_info + "\n"
-                    
-                    # 收集工具结果
-                    collected_tool_results.append({
-                        "tool": tool_name,
-                        "call": tool_args,
-                        "result": tool_result
-                    })
-                    
-                    # 更新对话上下文，包含工具结果
-                    tool_context = f"[MCP工具调用结果 {tool_call_count}]\n工具: {tool_name}\n查询: {tool_args}\n结果: {tool_result}\n\n"
-                    full_user_prompt = f"{full_user_prompt}\n\n{tool_context}基于以上工具调用结果，请继续回答用户的问题。如果需要更多信息，可以继续调用工具。"
-                    
-                    # 继续下一轮，看是否需要更多工具调用
-                    continue
+                    # 解析成功，跳出重试循环
+                    break
                     
                 except (json.JSONDecodeError, ValueError) as e:
-                    error_msg = f"工具调用格式错误: {str(e)}"
-                    if stream_mode:
-                        for chunk in self._emit_processing(f"❌ {error_msg}", "tool_calling"):
-                            yield f'data: {json.dumps(chunk)}\n\n'
+                    if retry_count < self.valves.MAX_TOOL_CALLS - 1:
+                        retry_msg = f"⚠️ 工具调用格式错误({str(e)})，正在重试({retry_count + 1}/{self.valves.MAX_TOOL_CALLS})..."
+                        if stream_mode:
+                            for chunk in self._emit_processing(retry_msg, "tool_calling"):
+                                yield f'data: {json.dumps(chunk)}\n\n'
+                        else:
+                            yield retry_msg + "\n"
+                        continue
                     else:
-                        yield f"❌ {error_msg}\n"
-                    break
+                        # 达到最大重试次数
+                        error_msg = f"❌ 工具调用解析失败，已重试{self.valves.MAX_TOOL_CALLS}次: {str(e)}"
+                        if stream_mode:
+                            for chunk in self._emit_processing(error_msg, "tool_calling"):
+                                yield f'data: {json.dumps(chunk)}\n\n'
+                        else:
+                            yield error_msg + "\n"
+                        return
             else:
-                # 不需要工具调用，生成最终回答
+                # 不需要工具调用
+                no_tool_msg = "💭 AI决定无需调用工具，正在生成回答..."
+                if stream_mode:
+                    for chunk in self._emit_processing(no_tool_msg, "answer_generation"):
+                        yield f'data: {json.dumps(chunk)}\n\n'
+                else:
+                    yield no_tool_msg + "\n"
                 break
         
+        # 如果需要调用工具
+        tool_result = None
+        if tool_name and tool_args:
+            # 显示工具调用信息
+            call_info = f"🔧 正在调用MCP工具 '{tool_name}'..."
+            if stream_mode:
+                for chunk in self._emit_processing(call_info, "tool_calling"):
+                    yield f'data: {json.dumps(chunk)}\n\n'
+            else:
+                yield call_info + "\n"
+            
+            # 显示工具调用参数
+            tool_info = f"📝 工具调用参数: {json.dumps(tool_args, ensure_ascii=False)}"
+            if stream_mode:
+                for chunk in self._emit_processing(tool_info, "tool_calling"):
+                    yield f'data: {json.dumps(chunk)}\n\n'
+            else:
+                yield tool_info + "\n"
+            
+            # 调用MCP工具
+            tool_result = await self._execute_mcp_tool(tool_name, tool_args)
+            
+            # 显示工具调用结果
+            result_info = f"✅ 工具调用结果:\n{tool_result[:500]}{'...' if len(tool_result) > 500 else ''}"
+            if stream_mode:
+                for chunk in self._emit_processing(result_info, "tool_calling"):
+                    yield f'data: {json.dumps(chunk)}\n\n'
+            else:
+                yield result_info + "\n"
+        
         # 生成最终回答
-        if collected_tool_results:
+        if tool_result is not None:
             # 如果有工具调用结果，基于结果生成回答
             final_system_prompt = "你是专业的化学信息专家，请基于提供的MCP工具调用结果，为用户提供准确、详细的回答。"
             
-            tool_summary = "基于以下MCP工具调用结果:\n\n"
-            for i, result in enumerate(collected_tool_results, 1):
-                tool_name = result.get('tool', 'unknown')
-                tool_call = result.get('call', {})
-                tool_result = result.get('result', '')
-                tool_summary += f"工具调用{i}: {tool_name}\n"
-                tool_summary += f"参数{i}: {json.dumps(tool_call, ensure_ascii=False)}\n"
-                tool_summary += f"结果{i}: {tool_result}\n\n"
-            
-            final_user_prompt = f"{tool_summary}用户问题: {user_message}\n\n请基于以上工具调用结果为用户提供准确详细的回答。"
+            tool_summary = f"""基于以下MCP工具调用结果:
+
+工具调用: {tool_name}
+参数: {json.dumps(tool_args, ensure_ascii=False)}
+结果: {tool_result}
+
+用户问题: {user_message}
+
+请基于以上工具调用结果为用户提供准确详细的回答。"""
             
             if stream_mode:
                 # 流式模式开始生成回答的标识
@@ -804,7 +865,7 @@ TOOL_CALL:<工具名称>:<JSON参数>
                 yield f"data: {json.dumps(answer_start_msg)}\n\n"
                 
                 # 流式生成最终回答
-                for chunk in self._stream_openai_response(final_user_prompt, final_system_prompt):
+                for chunk in self._stream_openai_response(tool_summary, final_system_prompt):
                     # 包装成SSE格式
                     chunk_data = {
                         'choices': [{
@@ -817,7 +878,7 @@ TOOL_CALL:<工具名称>:<JSON参数>
                     yield f"data: {json.dumps(chunk_data)}\n\n"
             else:
                 yield "🧪 **基于MCP工具调用结果回答**\n"
-                final_answer = self._call_openai_api(final_system_prompt, final_user_prompt)
+                final_answer = self._call_openai_api(final_system_prompt, tool_summary)
                 yield final_answer
         else:
             # 没有工具调用，直接返回AI响应
@@ -845,7 +906,8 @@ TOOL_CALL:<工具名称>:<JSON参数>
                     yield f"data: {json.dumps(chunk_data)}\n\n"
             else:
                 yield "💭 **回答**\n"
-                yield ai_response
+                final_answer = self._call_openai_api(system_prompt, full_user_prompt)
+                yield final_answer
 
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Union[str, Generator, Iterator]:
         """主管道函数"""
@@ -857,7 +919,6 @@ TOOL_CALL:<工具名称>:<JSON参数>
             print(f"🔧 模型ID: {model_id}")
             print(f"📜 历史消息数量: {len(messages) if messages else 0}")
             print(f"🔗 MCP服务器: {self.valves.MCP_SERVER_URL}")
-            print(f"🏷️ MCP标签: {self.valves.MCP_TAG}")
 
         # 验证输入
         if not user_message or not user_message.strip():
@@ -865,7 +926,7 @@ TOOL_CALL:<工具名称>:<JSON参数>
             return
 
         # 检查是否是流式模式  
-        stream_mode = body.get("stream", False) and self.valves.ENABLE_STREAMING
+        stream_mode = self.valves.ENABLE_STREAMING
         
         try:
             # MCP服务发现阶段
@@ -875,21 +936,20 @@ TOOL_CALL:<工具名称>:<JSON参数>
             else:
                 yield "🔍 **阶段1**: 正在准备MCP服务...\n"
             
-            # 在同步环境中运行异步代码
+            # 在同步环境中运行异步代码 - 真正的流式处理
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                # 处理用户消息，可能包含多次工具调用
-                async def run_process():
-                    results = []
-                    async for result in self._process_user_message(user_message, messages, stream_mode):
-                        results.append(result)
-                    return results
+                # 创建异步生成器
+                async_gen = self._process_user_message(user_message, messages, stream_mode)
                 
-                # 获取所有结果并逐个yield
-                results = loop.run_until_complete(run_process())
-                for result in results:
-                    yield result
+                # 流式处理每个结果
+                while True:
+                    try:
+                        result = loop.run_until_complete(async_gen.__anext__())
+                        yield result
+                    except StopAsyncIteration:
+                        break
                 
                 # 最后发送完成信息
                 if stream_mode:
