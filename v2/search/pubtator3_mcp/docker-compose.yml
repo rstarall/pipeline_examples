@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  pubtator3-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pubtator3-mcp-server
+    ports:
+      - "8991:8991"
+    environment:
+      - PORT=8991
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8991/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - pubtator3-network
+
+networks:
+  pubtator3-network:
+    driver: bridge
+
+# Optional: Add volume for logs
+# volumes:
+#   pubtator3-logs:
+#     driver: local

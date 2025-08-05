@@ -1,12 +1,13 @@
 """
-Paperlist MCP Pipeline - 基于MCP协议的学术论文搜索管道
+PubTator3 MCP Pipeline - 基于MCP协议的学术论文搜索管道
 
 功能特性:
-1. 通过MCP JSON-RPC协议动态发现服务器工具
+1. 通过MCP JSON-RPC协议动态发现PubTator3服务器工具
 2. 使用MCP JSON-RPC协议进行工具调用
 3. 支持流式输出和智能工具选择
 4. AI决策驱动的单次工具调用模式
-5. 工具调用解析错误时自动重试机制
+5. 基于抽象内容的学术论文搜索
+6. 多源摘要检索功能
 """
 
 import os
@@ -57,7 +58,7 @@ class Pipeline:
         MCP_TOOLS_EXPIRE_HOURS: int
 
     def __init__(self):
-        self.name = "Paperlist MCP Academic Paper Pipeline"
+        self.name = "PubTator3 MCP Academic Paper Pipeline"
         
         # 初始化token统计
         self.token_stats = {
@@ -89,15 +90,15 @@ class Pipeline:
                 "DEBUG_MODE": os.getenv("DEBUG_MODE", "false").lower() == "true",
                 "MAX_TOOL_CALLS": int(os.getenv("MAX_TOOL_CALLS", "3")),
                 
-                # MCP配置 - 默认指向paperlist服务
-                "MCP_SERVER_URL": os.getenv("MCP_SERVER_URL", "http://localhost:8990"),
+                # MCP配置 - 默认指向pubtator3服务
+                "MCP_SERVER_URL": os.getenv("MCP_SERVER_URL", "http://localhost:8991"),
                 "MCP_TIMEOUT": int(os.getenv("MCP_TIMEOUT", "30")),
                 "MCP_TOOLS_EXPIRE_HOURS": int(os.getenv("MCP_TOOLS_EXPIRE_HOURS", "12")),
             }
         )
 
     async def on_startup(self):
-        print(f"Paperlist MCP Academic Paper Pipeline启动: {__name__}")
+        print(f"PubTator3 MCP Academic Paper Pipeline启动: {__name__}")
         
         # 验证必需的API密钥
         if not self.valves.OPENAI_API_KEY:
@@ -112,7 +113,7 @@ class Pipeline:
         print("🔧 MCP工具将在首次使用时自动发现")
 
     async def on_shutdown(self):
-        print(f"Paperlist MCP Academic Paper Pipeline关闭: {__name__}")
+        print(f"PubTator3 MCP Academic Paper Pipeline关闭: {__name__}")
         print("🔚 Pipeline已关闭")
 
     async def _initialize_mcp_session(self, stream_mode: bool = False) -> AsyncGenerator[str, None]:
@@ -134,7 +135,7 @@ class Pipeline:
                         "roots": {"listChanged": True}
                     },
                     "clientInfo": {
-                        "name": "Paperlist MCP Pipeline",
+                        "name": "PubTator3 MCP Pipeline",
                         "version": "1.0.0"
                     }
                 },
@@ -229,7 +230,7 @@ class Pipeline:
         if not self.valves.MCP_SERVER_URL:
             raise Exception("MCP服务器地址未配置")
         
-        start_msg = f"🔍 正在发现MCP工具..."
+        start_msg = f"🔍 正在发现PubTator3 MCP工具..."
         if stream_mode:
             for chunk in self._emit_processing(start_msg, "mcp_discovery"):
                 yield f'data: {json.dumps(chunk)}\n\n'
@@ -295,7 +296,7 @@ class Pipeline:
                         
                         tools = mcp_response.get("result", {}).get("tools", [])
                         
-                        # 加载所有工具（不再通过tags过滤）
+                        # 加载所有工具
                         for tool in tools:
                             tool_name = tool.get("name")
                             if tool_name:
@@ -308,7 +309,7 @@ class Pipeline:
                         self.tools_loaded = True
                         self.tools_loaded_time = time.time()  # 记录工具加载时间
                         
-                        final_msg = f"✅ 发现 {len(self.mcp_tools)} 个MCP工具"
+                        final_msg = f"✅ 发现 {len(self.mcp_tools)} 个PubTator3 MCP工具"
                         if len(self.mcp_tools) > 0:
                             final_msg += f": {', '.join(self.mcp_tools.keys())}"
                         
@@ -323,7 +324,7 @@ class Pipeline:
                         raise Exception(f"HTTP {response.status}: {error_text}")
                         
         except Exception as e:
-            error_msg = f"❌ MCP工具发现失败: {e}"
+            error_msg = f"❌ PubTator3 MCP工具发现失败: {e}"
             if stream_mode:
                 for chunk in self._emit_processing(error_msg, "mcp_discovery"):
                     yield f'data: {json.dumps(chunk)}\n\n'
@@ -354,7 +355,7 @@ class Pipeline:
             reason = f"工具已过期 ({expired_hours:.1f} 小时前加载)"
         
         if need_reload:
-            reload_msg = f"🔄 {reason}，正在重新发现MCP工具..."
+            reload_msg = f"🔄 {reason}，正在重新发现PubTator3 MCP工具..."
             if stream_mode:
                 for chunk in self._emit_processing(reload_msg, "mcp_discovery"):
                     yield f'data: {json.dumps(chunk)}\n\n'
@@ -469,13 +470,13 @@ class Pipeline:
         if "error" in result:
             return f"工具执行失败: {result['error']}"
         
-        # 处理paperlist MCP服务的返回格式
+        # 处理pubtator3 MCP服务的返回格式
         if "success" in result:
             if not result["success"]:
                 return f"搜索失败: {result.get('error', '未知错误')}"
             
             # 成功的搜索结果
-            if tool_name == "search_papers":
+            if tool_name == "search_papers_by_abstract":
                 papers = result.get("results", [])
                 if not papers:
                     return "没有找到相关论文"
@@ -485,56 +486,30 @@ class Pipeline:
                 for i, paper in enumerate(papers[:10], 1):  # 只显示前10篇
                     formatted_result += f"{i}. **{paper.get('title', '无题目')}**\n"
                     if paper.get('authors'):
-                        formatted_result += f"   作者: {paper['authors']}\n"
-                    if paper.get('year'):
-                        formatted_result += f"   年份: {paper['year']}\n"
-                    if paper.get('venue'):
-                        formatted_result += f"   期刊/会议: {paper['venue']}\n"
-                    if paper.get('citations'):
-                        formatted_result += f"   引用数: {paper['citations']}\n"
+                        authors_str = ', '.join(paper['authors']) if isinstance(paper['authors'], list) else str(paper['authors'])
+                        formatted_result += f"   作者: {authors_str}\n"
+                    if paper.get('date'):
+                        formatted_result += f"   发表日期: {paper['date']}\n"
+                    if paper.get('journal'):
+                        formatted_result += f"   期刊: {paper['journal']}\n"
+                    if paper.get('pmid'):
+                        formatted_result += f"   PMID: {paper['pmid']}\n"
                     if paper.get('abstract'):
-                        abstract = paper['abstract'][:300] + "..." if len(paper['abstract']) > 300 else paper['abstract']
+                        abstract = paper['abstract'][:400] + "..." if len(paper['abstract']) > 400 else paper['abstract']
                         formatted_result += f"   摘要: {abstract}\n"
+                        if paper.get('abstract_source'):
+                            formatted_result += f"   摘要来源: {paper['abstract_source']}\n"
                     
                     # 添加链接
                     links = []
                     if paper.get('doi'):
                         links.append(f"DOI: https://doi.org/{paper['doi']}")
-                    if paper.get('arxiv_pdf_url'):
-                        links.append(f"ArXiv: {paper['arxiv_pdf_url']}")
+                    if paper.get('pmid'):
+                        links.append(f"PubMed: https://pubmed.ncbi.nlm.nih.gov/{paper['pmid']}")
                     if links:
                         formatted_result += f"   链接: {', '.join(links)}\n"
                     
                     formatted_result += "\n"
-                
-                return formatted_result
-            
-            elif tool_name == "get_paper_details":
-                paper = result.get("result", {})
-                if not paper:
-                    return "无法获取论文详细信息"
-                
-                formatted_result = f"**论文详细信息**\n\n"
-                formatted_result += f"标题: {paper.get('title', '无题目')}\n"
-                if paper.get('authors'):
-                    formatted_result += f"作者: {paper['authors']}\n"
-                if paper.get('year'):
-                    formatted_result += f"年份: {paper['year']}\n"
-                if paper.get('venue'):
-                    formatted_result += f"期刊/会议: {paper['venue']}\n"
-                if paper.get('citations'):
-                    formatted_result += f"引用数: {paper['citations']}\n"
-                if paper.get('abstract'):
-                    formatted_result += f"摘要: {paper['abstract']}\n"
-                
-                # 添加链接
-                links = []
-                if paper.get('doi'):
-                    links.append(f"DOI: https://doi.org/{paper['doi']}")
-                if paper.get('arxiv_pdf_url'):
-                    links.append(f"ArXiv: {paper['arxiv_pdf_url']}")
-                if links:
-                    formatted_result += f"链接: {', '.join(links)}\n"
                 
                 return formatted_result
         
@@ -714,7 +689,7 @@ class Pipeline:
 
     def _get_system_prompt(self) -> str:
         """动态生成基于可用MCP工具的系统提示词"""
-        base_prompt = """你是一个专业的学术论文搜索助手，能够使用MCP工具来查询学术论文的详细信息。
+        base_prompt = """你是一个专业的学术论文搜索助手，能够使用PubTator3 MCP工具来查询学术论文的详细信息。
 
 🔧 可用工具：
 """
@@ -744,26 +719,27 @@ class Pipeline:
         base_prompt += """
 🧠 使用指南：
 1. 当用户询问学术论文相关信息时，分析他们的需求并选择合适的工具
-2. search_papers工具用于搜索论文，支持关键词、作者名、论文标题等搜索
-3. get_paper_details工具用于获取特定论文的详细信息
+2. search_papers_by_abstract工具用于基于摘要内容搜索论文，支持关键词搜索
+3. 该工具会返回包含PMID、标题、作者、期刊、发表日期、DOI和完整摘要的论文信息
 4. 搜索时应使用英文关键词，效果更好
-5. 可以根据年份范围、排序方式等参数优化搜索结果
-6. 搜索结果会包含论文标题、作者、摘要、DOI、ArXiv链接等信息
+5. 可以根据页面大小、页码等参数优化搜索结果
+6. 工具支持多源摘要检索，会从Semantic Scholar、OpenAlex、CrossRef等来源获取完整摘要
 
 🔍 搜索建议：
 - 使用具体的研究主题关键词
 - 可以组合多个相关术语
 - 考虑使用作者姓名搜索
-- 利用年份范围缩小搜索范围
+- 利用分页功能获取更多结果
+- 启用完整摘要检索获取详细信息
 
 🔄 工具调用格式：
 如果需要调用工具，请回复：
 TOOL_CALL:<工具名称>:<JSON参数>
 
 示例：
-- TOOL_CALL:search_papers:{"query": "machine learning", "page_size": 10, "year_min": 2020}
-- TOOL_CALL:search_papers:{"query": "natural language processing transformers", "sort_by": "cits-dsc"}
-- TOOL_CALL:get_paper_details:{"paper_id": 12345}
+- TOOL_CALL:search_papers_by_abstract:{"query": "machine learning", "page_size": 10, "include_full_abstracts": true}
+- TOOL_CALL:search_papers_by_abstract:{"query": "COVID-19 vaccine", "page": 1, "page_size": 15, "max_concurrent": 3}
+- TOOL_CALL:search_papers_by_abstract:{"query": "CRISPR gene editing", "include_full_abstracts": false}
 
 如果不需要工具调用，请直接回答用户问题。可以多次调用工具获取更完整的信息。
 """
@@ -800,7 +776,7 @@ TOOL_CALL:<工具名称>:<JSON参数>
 
 当前用户问题: {user_message}
 
-请根据上下文和当前问题，决定是否需要调用MCP工具。如果需要，请按照指定格式回复工具调用。
+请根据上下文和当前问题，决定是否需要调用PubTator3 MCP工具。如果需要，请按照指定格式回复工具调用。
 回答要忠于上下文、当前问题、工具返回的信息。"""
         
         return full_user_prompt
@@ -840,7 +816,7 @@ TOOL_CALL:<工具名称>:<JSON参数>
     async def _execute_tool_call_with_feedback(self, tool_name: str, tool_args: dict, stream_mode: bool) -> AsyncGenerator[str, None]:
         """执行工具调用并提供进度反馈"""
         # 显示工具调用信息
-        call_info = f"🔧 正在调用MCP工具 '{tool_name}'..."
+        call_info = f"🔧 正在调用PubTator3 MCP工具 '{tool_name}'..."
         if stream_mode:
             for chunk in self._emit_processing(call_info, "tool_calling"):
                 yield f'data: {json.dumps(chunk)}\n\n'
@@ -873,9 +849,9 @@ TOOL_CALL:<工具名称>:<JSON参数>
         """生成最终回答"""
         if tool_result is not None:
             # 如果有工具调用结果，基于结果生成回答
-            final_system_prompt = "你是专业的学术论文搜索专家，请基于提供的MCP工具调用结果，为用户提供准确、详细的回答。请包含你的分析和见解。"
+            final_system_prompt = "你是专业的学术论文搜索专家，请基于提供的PubTator3 MCP工具调用结果，为用户提供准确、详细的回答。请包含你的分析和见解。"
             
-            tool_summary = f"""基于以下MCP工具调用结果:
+            tool_summary = f"""基于以下PubTator3 MCP工具调用结果:
 
 工具调用: {tool_name}
 参数: {json.dumps(tool_args, ensure_ascii=False)}
@@ -885,14 +861,14 @@ TOOL_CALL:<工具名称>:<JSON参数>
 
 请基于以上工具调用结果为用户提供准确详细的回答，并加入你的专业分析和见解。注意：
 1. 尽量输出完整的信息，不要省略重要的详细内容
-2. 有资源地址（如DOI、ArXiv链接、PDF链接等）时，使用markdown格式输出可点击链接"""
+2. 有资源地址（如DOI、PubMed链接等）时，使用markdown格式输出可点击链接"""
             
             if stream_mode:
                 # 流式模式开始生成回答的标识
                 answer_start_msg = {
                     'choices': [{
                         'delta': {
-                            'content': "\n**📚 基于MCP工具调用结果的专业分析**\n"
+                            'content': "\n**📚 基于PubTator3工具调用结果的专业分析**\n"
                         },
                         'finish_reason': None
                     }]
@@ -912,7 +888,7 @@ TOOL_CALL:<工具名称>:<JSON参数>
                     }
                     yield f"data: {json.dumps(chunk_data)}\n\n"
             else:
-                yield "📚 **基于MCP工具调用结果的专业分析**\n"
+                yield "📚 **基于PubTator3工具调用结果的专业分析**\n"
                 final_answer = self._call_openai_api(final_system_prompt, tool_summary)
                 yield final_answer
         else:
@@ -952,7 +928,7 @@ TOOL_CALL:<工具名称>:<JSON参数>
             async for tools_output in self._ensure_tools_loaded(stream_mode):
                 yield tools_output
         except Exception as e:
-            error_msg = f"❌ MCP工具加载失败: {str(e)}"
+            error_msg = f"❌ PubTator3 MCP工具加载失败: {str(e)}"
             if stream_mode:
                 for chunk in self._emit_processing(error_msg, "mcp_discovery"):
                     yield f'data: {json.dumps(chunk)}\n\n'
@@ -965,7 +941,7 @@ TOOL_CALL:<工具名称>:<JSON参数>
         full_user_prompt = self._build_conversation_context(user_message, messages)
         
         # 显示AI决策进度
-        decision_msg = "🤔 正在分析用户问题，决定是否需要调用工具..."
+        decision_msg = "🤔 正在分析用户问题，决定是否需要调用PubTator3工具..."
         if stream_mode:
             for chunk in self._emit_processing(decision_msg, "tool_calling"):
                 yield f'data: {json.dumps(chunk)}\n\n'
@@ -1034,7 +1010,7 @@ TOOL_CALL:<工具名称>:<JSON参数>
         self._reset_token_stats()
 
         if self.valves.DEBUG_MODE:
-            print(f"📚 Paperlist MCP学术论文助手收到消息: {user_message}")
+            print(f"📚 PubTator3 MCP学术论文助手收到消息: {user_message}")
             print(f"🔧 模型ID: {model_id}")
             print(f"📜 历史消息数量: {len(messages) if messages else 0}")
             print(f"🔗 MCP服务器: {self.valves.MCP_SERVER_URL}")
@@ -1050,10 +1026,10 @@ TOOL_CALL:<工具名称>:<JSON参数>
         try:
             # MCP服务发现阶段
             if stream_mode:
-                for chunk in self._emit_processing("🔍 正在准备MCP服务...", "mcp_discovery"):
+                for chunk in self._emit_processing("🔍 正在准备PubTator3 MCP服务...", "mcp_discovery"):
                     yield f'data: {json.dumps(chunk)}\n\n'
             else:
-                yield "🔍 **阶段1**: 正在准备MCP服务...\n"
+                yield "🔍 **阶段1**: 正在准备PubTator3 MCP服务...\n"
             
             # 在同步环境中运行异步代码 - 真正的流式处理
             loop = asyncio.new_event_loop()

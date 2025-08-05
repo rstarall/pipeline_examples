@@ -672,9 +672,11 @@ class Pipeline:
         base_prompt += """
 🧠 使用指南：
 1. 当用户询问化学物质信息时，分析他们的需求并选择合适的工具
-2. PubChem数据库主要使用英文，因此query参数应为英文名称、分子式或SMILES字符串
-3. 如果用户提供中文化学名称，请转换为对应的英文名称
-4. 优先使用英文化学名称搜索（更准确）
+2. 当信息不全或涉及专业知识时，优先调用工具获取准确详细的数据
+3. 即使对化学知识有一定了解，也建议通过工具验证和补充最新信息
+4. PubChem数据库主要使用英文，因此query参数应为英文名称、分子式或SMILES字符串
+5. 如果用户提供中文化学名称，请转换为对应的英文名称
+6. 优先使用英文化学名称搜索（更准确）
 
 转换示例：
 - "咖啡因" → "caffeine" (中文转英文名)
@@ -695,34 +697,20 @@ TOOL_CALL:<工具名称>:<JSON参数>
         
         return base_prompt
 
-    async def _process_user_message(self, user_message: str, messages: List[dict], stream_mode: bool) -> AsyncGenerator[str, None]:
-        """处理用户消息，支持多轮MCP工具调用"""
-        
-        # 确保工具已加载且未过期
-        try:
-            async for tools_output in self._ensure_tools_loaded(stream_mode):
-                yield tools_output
-        except Exception as e:
-            error_msg = f"❌ MCP工具加载失败: {str(e)}"
-            if stream_mode:
-                for chunk in self._emit_processing(error_msg, "mcp_discovery"):
-                    yield f'data: {json.dumps(chunk)}\n\n'
-            else:
-                yield error_msg + "\n"
-            return
-        
-        # 获取系统提示词
-        system_prompt = self._get_system_prompt()
-        
+    def _build_conversation_context(self, user_message: str, messages: List[dict]) -> str:
+        """构建完整的对话上下文"""
         # 构建对话历史
         conversation_history = []
         if messages and len(messages) > 1:
-            # 取最近的几轮对话作为上下文
-            recent_messages = messages[-6:] if len(messages) > 6 else messages
+            # 取最近的2轮对话作为上下文（4条消息）
+            recent_messages = messages[-4:] if len(messages) > 4 else messages
             for msg in recent_messages:
                 role = msg.get("role", "")
                 content = msg.get("content", "")
                 if role in ["user", "assistant"]:
+                    # 对对话内容进行300长度截断
+                    if len(content) > 300:
+                        content = content[:300] + "..."
                     conversation_history.append({"role": role, "content": content})
         
         # 添加当前用户消息
@@ -742,102 +730,74 @@ TOOL_CALL:<工具名称>:<JSON参数>
 请根据上下文和当前问题，决定是否需要调用MCP工具。如果需要，请按照指定格式回复工具调用。
 回答要忠于上下文、当前问题、工具返回的信息。"""
         
-        # 显示AI决策进度
-        decision_msg = "🤔 正在分析用户问题，决定是否需要调用工具..."
+        return full_user_prompt
+
+    def _parse_tool_call(self, ai_response: str) -> tuple[str, dict, str]:
+        """解析AI响应中的工具调用
+        
+        Returns:
+            tuple: (tool_name, tool_args, error_message)
+            如果解析成功，error_message为None
+            如果解析失败，tool_name和tool_args为None，返回错误信息
+        """
+        if not ai_response.startswith("TOOL_CALL:"):
+            return None, None, None
+        
+        try:
+            # 解析工具调用
+            tool_call_str = ai_response.replace("TOOL_CALL:", "", 1)
+            
+            # 找到第一个冒号分隔工具名称和参数
+            if ":" in tool_call_str:
+                tool_name, tool_args_str = tool_call_str.split(":", 1)
+                tool_name = tool_name.strip()
+                tool_args = json.loads(tool_args_str)
+            else:
+                raise ValueError("无效的工具调用格式")
+            
+            # 验证工具是否存在
+            if tool_name not in self.mcp_tools:
+                raise ValueError(f"工具 '{tool_name}' 不存在")
+            
+            return tool_name, tool_args, None
+            
+        except (json.JSONDecodeError, ValueError) as e:
+            return None, None, str(e)
+
+    async def _execute_tool_call_with_feedback(self, tool_name: str, tool_args: dict, stream_mode: bool) -> AsyncGenerator[str, None]:
+        """执行工具调用并提供进度反馈"""
+        # 显示工具调用信息
+        call_info = f"🔧 正在调用MCP工具 '{tool_name}'..."
         if stream_mode:
-            for chunk in self._emit_processing(decision_msg, "tool_calling"):
+            for chunk in self._emit_processing(call_info, "tool_calling"):
                 yield f'data: {json.dumps(chunk)}\n\n'
         else:
-            yield decision_msg + "\n"
+            yield call_info + "\n"
         
-        # 获取AI响应，如果解析失败则重试
-        tool_name = None
-        tool_args = None
-        ai_response = None
+        # 显示工具调用参数
+        tool_info = f"📝 工具调用参数: {json.dumps(tool_args, ensure_ascii=False)}"
+        if stream_mode:
+            for chunk in self._emit_processing(tool_info, "tool_calling"):
+                yield f'data: {json.dumps(chunk)}\n\n'
+        else:
+            yield tool_info + "\n"
         
-        for retry_count in range(self.valves.MAX_TOOL_CALLS):
-            ai_response = self._call_openai_api(system_prompt, full_user_prompt)
-            
-            # 检查是否需要调用工具
-            if ai_response.startswith("TOOL_CALL:"):
-                try:
-                    # 解析工具调用
-                    tool_call_str = ai_response.replace("TOOL_CALL:", "", 1)
-                    
-                    # 找到第一个冒号分隔工具名称和参数
-                    if ":" in tool_call_str:
-                        tool_name, tool_args_str = tool_call_str.split(":", 1)
-                        tool_name = tool_name.strip()
-                        tool_args = json.loads(tool_args_str)
-                    else:
-                        raise ValueError("无效的工具调用格式")
-                    
-                    # 验证工具是否存在
-                    if tool_name not in self.mcp_tools:
-                        raise ValueError(f"工具 '{tool_name}' 不存在")
-                    
-                    # 解析成功，跳出重试循环
-                    break
-                    
-                except (json.JSONDecodeError, ValueError) as e:
-                    if retry_count < self.valves.MAX_TOOL_CALLS - 1:
-                        retry_msg = f"⚠️ 工具调用格式错误({str(e)})，正在重试({retry_count + 1}/{self.valves.MAX_TOOL_CALLS})..."
-                        if stream_mode:
-                            for chunk in self._emit_processing(retry_msg, "tool_calling"):
-                                yield f'data: {json.dumps(chunk)}\n\n'
-                        else:
-                            yield retry_msg + "\n"
-                        continue
-                    else:
-                        # 达到最大重试次数
-                        error_msg = f"❌ 工具调用解析失败，已重试{self.valves.MAX_TOOL_CALLS}次: {str(e)}"
-                        if stream_mode:
-                            for chunk in self._emit_processing(error_msg, "tool_calling"):
-                                yield f'data: {json.dumps(chunk)}\n\n'
-                        else:
-                            yield error_msg + "\n"
-                        return
-            else:
-                # 不需要工具调用
-                no_tool_msg = "💭 AI决定无需调用工具，正在生成回答..."
-                if stream_mode:
-                    for chunk in self._emit_processing(no_tool_msg, "answer_generation"):
-                        yield f'data: {json.dumps(chunk)}\n\n'
-                else:
-                    yield no_tool_msg + "\n"
-                break
+        # 调用MCP工具
+        tool_result = await self._execute_mcp_tool(tool_name, tool_args)
         
-        # 如果需要调用工具
-        tool_result = None
-        if tool_name and tool_args:
-            # 显示工具调用信息
-            call_info = f"🔧 正在调用MCP工具 '{tool_name}'..."
-            if stream_mode:
-                for chunk in self._emit_processing(call_info, "tool_calling"):
-                    yield f'data: {json.dumps(chunk)}\n\n'
-            else:
-                yield call_info + "\n"
-            
-            # 显示工具调用参数
-            tool_info = f"📝 工具调用参数: {json.dumps(tool_args, ensure_ascii=False)}"
-            if stream_mode:
-                for chunk in self._emit_processing(tool_info, "tool_calling"):
-                    yield f'data: {json.dumps(chunk)}\n\n'
-            else:
-                yield tool_info + "\n"
-            
-            # 调用MCP工具
-            tool_result = await self._execute_mcp_tool(tool_name, tool_args)
-            
-            # 显示工具调用结果
-            result_info = f"✅ 工具调用结果:\n{tool_result[:500]}{'...' if len(tool_result) > 500 else ''}"
-            if stream_mode:
-                for chunk in self._emit_processing(result_info, "tool_calling"):
-                    yield f'data: {json.dumps(chunk)}\n\n'
-            else:
-                yield result_info + "\n"
+        # 显示工具调用结果
+        result_info = f"✅ 工具调用结果:\n```json\n{tool_result}\n```"
+        if stream_mode:
+            for chunk in self._emit_processing(result_info, "tool_calling"):
+                yield f'data: {json.dumps(chunk)}\n\n'
+        else:
+            yield result_info + "\n"
         
-        # 生成最终回答
+        # 最后返回工具结果（作为特殊标记的字符串）
+        yield f"TOOL_RESULT:{tool_result}"
+
+    async def _generate_final_answer(self, user_message: str, tool_result: str, tool_name: str, tool_args: dict, full_user_prompt: str, system_prompt: str, stream_mode: bool) -> AsyncGenerator[str, None]:
+        """生成最终回答"""
         if tool_result is not None:
             # 如果有工具调用结果，基于结果生成回答
             final_system_prompt = "你是专业的化学信息专家，请基于提供的MCP工具调用结果，为用户提供准确、详细的回答。"
@@ -908,6 +868,90 @@ TOOL_CALL:<工具名称>:<JSON参数>
                 yield "💭 **回答**\n"
                 final_answer = self._call_openai_api(system_prompt, full_user_prompt)
                 yield final_answer
+
+    async def _process_user_message(self, user_message: str, messages: List[dict], stream_mode: bool) -> AsyncGenerator[str, None]:
+        """处理用户消息，支持多轮MCP工具调用（重构后的简化版本）"""
+        
+        # 确保工具已加载且未过期
+        try:
+            async for tools_output in self._ensure_tools_loaded(stream_mode):
+                yield tools_output
+        except Exception as e:
+            error_msg = f"❌ MCP工具加载失败: {str(e)}"
+            if stream_mode:
+                for chunk in self._emit_processing(error_msg, "mcp_discovery"):
+                    yield f'data: {json.dumps(chunk)}\n\n'
+            else:
+                yield error_msg + "\n"
+            return
+        
+        # 获取系统提示词和构建上下文
+        system_prompt = self._get_system_prompt()
+        full_user_prompt = self._build_conversation_context(user_message, messages)
+        
+        # 显示AI决策进度
+        decision_msg = "🤔 正在分析用户问题，决定是否需要调用工具..."
+        if stream_mode:
+            for chunk in self._emit_processing(decision_msg, "tool_calling"):
+                yield f'data: {json.dumps(chunk)}\n\n'
+        else:
+            yield decision_msg + "\n"
+        
+        # 尝试解析工具调用，如果失败则重试
+        tool_name, tool_args = None, None
+        
+        for retry_count in range(self.valves.MAX_TOOL_CALLS):
+            ai_response = self._call_openai_api(system_prompt, full_user_prompt)
+            tool_name, tool_args, parse_error = self._parse_tool_call(ai_response)
+            
+            if parse_error is None:
+                # 解析成功或无需工具调用
+                if tool_name is None:
+                    # 不需要工具调用
+                    no_tool_msg = "💭 AI决定无需调用工具，正在生成回答..."
+                    if stream_mode:
+                        for chunk in self._emit_processing(no_tool_msg, "answer_generation"):
+                            yield f'data: {json.dumps(chunk)}\n\n'
+                    else:
+                        yield no_tool_msg + "\n"
+                break
+            else:
+                # 解析失败，重试
+                if retry_count < self.valves.MAX_TOOL_CALLS - 1:
+                    retry_msg = f"⚠️ 工具调用格式错误({parse_error})，正在重试({retry_count + 1}/{self.valves.MAX_TOOL_CALLS})..."
+                    if stream_mode:
+                        for chunk in self._emit_processing(retry_msg, "tool_calling"):
+                            yield f'data: {json.dumps(chunk)}\n\n'
+                    else:
+                        yield retry_msg + "\n"
+                    continue
+                else:
+                    # 达到最大重试次数
+                    error_msg = f"❌ 工具调用解析失败，已重试{self.valves.MAX_TOOL_CALLS}次: {parse_error}"
+                    if stream_mode:
+                        for chunk in self._emit_processing(error_msg, "tool_calling"):
+                            yield f'data: {json.dumps(chunk)}\n\n'
+                    else:
+                        yield error_msg + "\n"
+                    return
+        
+        # 执行工具调用（如果需要）
+        tool_result = None
+        if tool_name and tool_args:
+            async for output in self._execute_tool_call_with_feedback(tool_name, tool_args, stream_mode):
+                if isinstance(output, str) and output.startswith('TOOL_RESULT:'):
+                    # 这是最终的工具结果
+                    tool_result = output.replace('TOOL_RESULT:', '', 1)
+                else:
+                    # 这是进度反馈
+                    yield output
+        
+        # 生成最终回答
+        async for output in self._generate_final_answer(
+            user_message, tool_result, tool_name, tool_args, 
+            full_user_prompt, system_prompt, stream_mode
+        ):
+            yield output
 
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Union[str, Generator, Iterator]:
         """主管道函数"""
