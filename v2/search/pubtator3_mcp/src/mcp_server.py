@@ -240,7 +240,7 @@ class PubTator3API:
         """Get abstract using multiple sources with fallback mechanism"""
         title = paper.get('title', '')
         doi = paper.get('doi', '')
-        pmid = paper.get('pmid', '')
+        pmid = str(paper.get('pmid', '')) if paper.get('pmid') else ''
         
         logger.debug(f"Fetching abstract for PMID {pmid}: {title[:50]}...")
         
@@ -274,15 +274,21 @@ class PubTator3API:
 
 def create_paper_info(paper: Dict[str, Any], abstract: str = "", abstract_source: str = "") -> PaperInfo:
     """Create PaperInfo from PubTator3 API response data"""
+    def safe_str(value) -> Optional[str]:
+        """Convert value to string, return None for empty/None values"""
+        if value is None or value == "":
+            return None
+        return str(value).strip() or None
+    
     return PaperInfo(
-        pmid=paper.get('pmid'),
-        title=paper.get('title'),
-        authors=paper.get('authors', []),
-        journal=paper.get('journal'),
-        date=paper.get('date'),
-        doi=paper.get('doi'),
-        abstract=abstract,
-        abstract_source=abstract_source
+        pmid=safe_str(paper.get('pmid')),
+        title=safe_str(paper.get('title')),
+        authors=paper.get('authors') if isinstance(paper.get('authors'), list) else [],
+        journal=safe_str(paper.get('journal')),
+        date=safe_str(paper.get('date')),
+        doi=safe_str(paper.get('doi')),
+        abstract=safe_str(abstract) if abstract else None,
+        abstract_source=abstract_source or None
     )
 
 @mcp.tool(tags={"search", "academic", "public", "abstract"})

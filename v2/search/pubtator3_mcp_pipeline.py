@@ -833,6 +833,11 @@ TOOL_CALL:<工具名称>:<JSON参数>
         
         # 调用MCP工具
         tool_result = await self._execute_mcp_tool(tool_name, tool_args)
+        try:
+            json_tool_result = json.loads(tool_result)
+            tool_result = json.dumps(json_tool_result, indent=4)
+        except json.JSONDecodeError:
+            pass
         
         # 显示工具调用结果
         result_info = f"✅ 工具调用结果:\n```json\n{tool_result}\n```"

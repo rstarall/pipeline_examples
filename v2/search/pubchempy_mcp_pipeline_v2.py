@@ -785,6 +785,12 @@ TOOL_CALL:<工具名称>:<JSON参数>
         # 调用MCP工具
         tool_result = await self._execute_mcp_tool(tool_name, tool_args)
         
+        try:
+            json_tool_result = json.loads(tool_result)
+            tool_result = json.dumps(json_tool_result, indent=4)
+        except json.JSONDecodeError:
+            pass
+        
         # 显示工具调用结果
         result_info = f"✅ 工具调用结果:\n```json\n{tool_result}\n```"
         if stream_mode:
@@ -810,7 +816,19 @@ TOOL_CALL:<工具名称>:<JSON参数>
 
 用户问题: {user_message}
 
-请基于以上工具调用结果为用户提供准确详细的回答。"""
+请基于以上工具调用结果为用户提供准确详细的回答。
+输出格式要求：
+1. 使用结构化的markdown格式组织信息
+2. 对于化学物质信息，使用markdown表格展示基本属性，例如：
+   | 属性 | 值 |
+   |------|-----|
+   | 分子式 | C8H10N4O2 |
+   | 分子量 | 194.19 g/mol |
+   | SMILES | Cn1c(=O)c2c(ncn2C)n(C)c1=O |
+3. 同义名称、别名等列表信息使用有序或无序列表
+4. 相关链接使用markdown链接格式：[链接文本](URL)
+5. 数值数据优先使用表格形式展示，便于比较和阅读
+6. 保持信息的完整性，不要省略重要细节"""
             
             if stream_mode:
                 # 流式模式开始生成回答的标识
