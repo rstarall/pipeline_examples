@@ -60,6 +60,7 @@ class Pipeline:
         ENABLE_STREAMING: bool
         DEBUG_MODE: bool
         MAX_REACT_ITERATIONS: int
+        MIN_PAPERS_THRESHOLD: int
         
         # MCP配置
         MCP_SERVER_URL: str
@@ -109,6 +110,7 @@ class Pipeline:
                 "ENABLE_STREAMING": os.getenv("ENABLE_STREAMING", "true").lower() == "true",
                 "DEBUG_MODE": os.getenv("DEBUG_MODE", "false").lower() == "true",
                 "MAX_REACT_ITERATIONS": int(os.getenv("MAX_REACT_ITERATIONS", "10")),
+                "MIN_PAPERS_THRESHOLD": int(os.getenv("MIN_PAPERS_THRESHOLD", "20")),
                 
                 # MCP配置 - 默认指向semantic scholar服务
                 "MCP_SERVER_URL": os.getenv("MCP_SERVER_URL", "http://localhost:8992"),
@@ -793,10 +795,11 @@ class Pipeline:
             "authors": "作者列表", 
             "year": "发表年份",
             "venue": "期刊/会议",
-            "abstract": "关键摘要内容",
+            "abstract": "摘要内容",
             "citation_count": "引用数",
             "relevance_weight": 0.0-1.0,
-            "key_findings": "关键发现或结论"
+            "key_findings": "关键发现或结论",
+            "urls": ["DOI链接", "开放访问PDF链接", "论文URL等"]
         }}
     ],
     "observation": "基于论文内容的详细分析"
@@ -815,6 +818,9 @@ class Pipeline:
             
             # 处理关键论文信息，更新papers_collected
             key_papers = observation_data.get('key_papers', [])
+            selected_papers = []
+            added_count = 0
+            
             if key_papers:
                 # 按相关性权重排序，选择前80%的论文
                 papers_with_weights = []
@@ -829,9 +835,16 @@ class Pipeline:
                 num_to_select = max(5, int(len(papers_with_weights) * 0.8))
                 selected_papers = papers_with_weights[:num_to_select]
                 
-                # 添加到收集列表
+                # 添加到收集列表，避免重复
                 for paper, weight in selected_papers:
-                    self.react_state['papers_collected'].append(paper)
+                    # 简单的重复检查：基于标题
+                    paper_title = paper.get('title', '').strip().lower()
+                    if paper_title and not any(
+                        existing_paper.get('title', '').strip().lower() == paper_title 
+                        for existing_paper in self.react_state['papers_collected']
+                    ):
+                        self.react_state['papers_collected'].append(paper)
+                        added_count += 1
             
             if stream_mode:
                 obs_content = f"观察分析：{observation_data.get('observation', '无')}"
@@ -841,8 +854,7 @@ class Pipeline:
                 
                 if key_papers:
                     obs_content += f"\n发现 {len(key_papers)} 篇关键论文"
-                    num_selected = min(max(5, int(len(key_papers) * 0.8)), len(key_papers))
-                    obs_content += f"，按相关性选择({num_selected}篇)已收录"
+                    obs_content += f"，按相关性选择({len(selected_papers)}篇)，实际新增({added_count}篇)已收录"
                 
                 query_source = observation_data.get('query_source', 'current_papers')
                 source_desc = {
@@ -873,10 +885,15 @@ class Pipeline:
         context = self._build_conversation_context(user_message, messages)
         papers_summary = self._summarize_collected_papers()
         
+        # 获取论文统计信息
+        total_papers_count = len(self.react_state['papers_collected'])
+        
         final_prompt = f"""基于收集到的论文信息回答用户问题：
 
 用户问题: {user_message}
 对话历史: {context}
+
+📊 **检索统计**: 通过Semantic Scholar检索，共收集到 {total_papers_count} 篇相关学术论文
 
 收集到的论文信息:
 {papers_summary}
@@ -891,7 +908,7 @@ class Pipeline:
 7. **学术权威性** - 优先引用高引用数的重要论文
 
 请基于以上所有论文信息提供全面、详细、准确的回答。包含相关论文的完整引用信息（标题、作者、年份、期刊、引用数等）。
-如果有DOI或URL，请使用markdown格式输出可点击链接。"""
+如果有DOI、URL、开放访问PDF链接，请使用markdown格式输出可点击链接。"""
 
         system_prompt = """你是专业的学术论文分析专家。你的任务是：
 1. 仔细分析所有提供的论文信息
@@ -899,7 +916,8 @@ class Pipeline:
 3. 提供全面、详细、有深度的学术回答
 4. 确保每个观点都有论文支撑和引用
 5. 整合多个研究来源，提供综合性见解
-6. 优先引用高影响力（高引用数）的论文"""
+6. 优先引用高影响力（高引用数）的论文
+7. 在回答开头简要提及检索到的论文数量统计，体现研究的全面性"""
 
         if stream_mode:
             for chunk in self._stream_openai_response(final_prompt, system_prompt):
@@ -979,6 +997,10 @@ class Pipeline:
             summary += f"相关性权重: {paper.get('relevance_weight', 1.0)}\n"
             if paper.get('key_findings'):
                 summary += f"关键发现: {paper.get('key_findings')}\n"
+            if paper.get('urls'):
+                urls = paper.get('urls')
+                if isinstance(urls, list) and urls:
+                    summary += f"相关链接: {', '.join(urls)}\n"
             if paper.get('abstract'):
                 # 限制摘要长度，避免过长
                 abstract = paper.get('abstract')
@@ -1088,6 +1110,15 @@ class Pipeline:
                 # 继续使用相同查询词进行下一轮搜索
                 # current_query 保持不变
                 continue
+            
+            # 检查已收集论文数量，如果达到阈值则强制停止
+            collected_papers_count = len(self.react_state['papers_collected'])
+            if collected_papers_count >= self.valves.MIN_PAPERS_THRESHOLD:
+                if stream_mode:
+                    stop_content = f"\n✅ 已收集足够论文({collected_papers_count}篇 >= {self.valves.MIN_PAPERS_THRESHOLD}篇阈值)，停止搜索"
+                    for chunk in self._emit_processing(stop_content, "observation"):
+                        yield f'data: {json.dumps(chunk)}\n\n'
+                break
             
             # 检查是否需要继续搜索
             if not observation or not observation.get("need_more_search", False) or observation.get("sufficient_info", False):

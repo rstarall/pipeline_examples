@@ -59,6 +59,7 @@ class Pipeline:
         ENABLE_STREAMING: bool
         DEBUG_MODE: bool
         MAX_REACT_ITERATIONS: int
+        MIN_PAPERS_THRESHOLD: int
         
         # MCP配置
         MCP_SERVER_URL: str
@@ -108,6 +109,7 @@ class Pipeline:
                 "ENABLE_STREAMING": os.getenv("ENABLE_STREAMING", "true").lower() == "true",
                 "DEBUG_MODE": os.getenv("DEBUG_MODE", "false").lower() == "true",
                 "MAX_REACT_ITERATIONS": int(os.getenv("MAX_REACT_ITERATIONS", "5")),
+                "MIN_PAPERS_THRESHOLD": int(os.getenv("MIN_PAPERS_THRESHOLD", "10")),
                 
                 # MCP配置
                 "MCP_SERVER_URL": os.getenv("MCP_SERVER_URL", "http://localhost:8991"),
@@ -788,9 +790,10 @@ class Pipeline:
             "title": "论文标题",
             "authors": "作者列表", 
             "doi": "DOI或链接",
-            "abstract": "关键摘要内容",
+            "abstract": "摘要内容",
             "relevance_weight": 0.0-1.0,
-            "key_findings": "关键发现或结论"
+            "key_findings": "关键发现或结论",
+            "urls": ["DOI链接", "开放访问PDF链接", "论文URL等"]
         }}
     ],
     "observation": "基于摘要内容的详细分析"
@@ -864,10 +867,15 @@ class Pipeline:
         context = self._build_conversation_context(user_message, messages)
         papers_summary = self._summarize_collected_papers()
         
+        # 获取论文统计信息
+        total_papers_count = len(self.react_state['papers_collected'])
+        
         final_prompt = f"""基于收集到的论文信息回答用户问题：
 
 用户问题: {user_message}
 对话历史: {context}
+
+📊 **检索统计**: 通过PubTator3检索，共收集到 {total_papers_count} 篇相关学术论文
 
 收集到的论文信息:
 {papers_summary}
@@ -1073,6 +1081,15 @@ class Pipeline:
                 # 继续使用相同查询词进行下一轮搜索
                 # current_query 保持不变
                 continue
+            
+            # 检查已收集论文数量，如果达到阈值则强制停止
+            collected_papers_count = len(self.react_state['papers_collected'])
+            if collected_papers_count >= self.valves.MIN_PAPERS_THRESHOLD:
+                if stream_mode:
+                    stop_content = f"\n✅ 已收集足够论文({collected_papers_count}篇 >= {self.valves.MIN_PAPERS_THRESHOLD}篇阈值)，停止搜索"
+                    for chunk in self._emit_processing(stop_content, "observation"):
+                        yield f'data: {json.dumps(chunk)}\n\n'
+                break
             
             # 检查是否需要继续搜索
             if not observation or not observation.get("need_more_search", False) or observation.get("sufficient_info", False):

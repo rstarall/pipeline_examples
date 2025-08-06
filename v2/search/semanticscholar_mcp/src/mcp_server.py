@@ -135,12 +135,12 @@ class SemanticScholarAPI:
         
         # Define fields to retrieve
         fields = 'paperId,title,abstract,venue,year,referenceCount,citationCount,influentialCitationCount,isOpenAccess,openAccessPdf,fieldsOfStudy,url,externalIds,tldr,publicationTypes,publicationDate,journal,authors'
-        
+        sub_fields = 'paperId,title,abstract,venue,year,referenceCount,citationCount,influentialCitationCount,isOpenAccess,openAccessPdf,fieldsOfStudy,url,externalIds,publicationTypes,publicationDate,journal,authors'
         params = {
             'query': query,
             'limit': limit,
             'offset': offset,
-            'fields': fields
+            'fields': sub_fields
         }
         
         try:
