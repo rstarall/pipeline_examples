@@ -68,6 +68,14 @@ class Pipeline:
     def __init__(self):
         self.name = "PubTator3 ReAct MCP Academic Paper Pipeline"
         
+        # 初始化token统计
+        self.token_stats = {
+            "input_tokens": 0, 
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "api_calls": 0
+        }
+        
         # MCP工具缓存
         self.mcp_tools = {}
         self.tools_loaded = False
@@ -484,7 +492,7 @@ class Pipeline:
         return json.dumps(result, ensure_ascii=False, indent=2)
 
     def _call_openai_api(self, system_prompt: str, user_prompt: str, json_mode: bool = False) -> str:
-        """调用OpenAI API"""
+        """调用OpenAI API并统计token使用量"""
         if not self.valves.OPENAI_API_KEY:
             return "错误: 未设置OpenAI API密钥"
         
@@ -498,6 +506,12 @@ class Pipeline:
         if system_prompt and system_prompt.strip():
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": user_prompt})
+        
+        # 统计输入token数量（用字符数估计）
+        input_text = ""
+        for msg in messages:
+            input_text += msg.get("content", "")
+        input_tokens = len(input_text)
         
         payload = {
             "model": self.valves.OPENAI_MODEL,
@@ -513,12 +527,25 @@ class Pipeline:
             response = requests.post(url, headers=headers, json=payload, timeout=self.valves.OPENAI_TIMEOUT)
             response.raise_for_status()
             result = response.json()
-            return result["choices"][0]["message"]["content"]
+            
+            # 获取响应内容
+            response_content = result["choices"][0]["message"]["content"]
+            
+            # 统计输出token数量（用字符数估计）
+            output_tokens = len(response_content)
+            
+            # 更新统计信息
+            self.token_stats["input_tokens"] += input_tokens
+            self.token_stats["output_tokens"] += output_tokens
+            self.token_stats["total_tokens"] += input_tokens + output_tokens
+            self.token_stats["api_calls"] += 1
+            
+            return response_content
         except Exception as e:
             return f"OpenAI API调用错误: {str(e)}"
 
     def _stream_openai_response(self, user_prompt: str, system_prompt: str) -> Generator:
-        """流式处理OpenAI响应"""
+        """流式处理OpenAI响应并统计token使用量"""
         if not self.valves.OPENAI_API_KEY:
             yield "错误: 未设置OpenAI API密钥"
             return
@@ -534,6 +561,12 @@ class Pipeline:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": user_prompt})
         
+        # 统计输入token数量（用字符数估计）
+        input_text = ""
+        for msg in messages:
+            input_text += msg.get("content", "")
+        input_tokens = len(input_text)
+        
         payload = {
             "model": self.valves.OPENAI_MODEL,
             "messages": messages,
@@ -541,6 +574,9 @@ class Pipeline:
             "temperature": self.valves.OPENAI_TEMPERATURE,
             "stream": True
         }
+        
+        # 用于累积输出内容
+        output_content = ""
         
         try:
             response = requests.post(url, headers=headers, json=payload, stream=True, timeout=self.valves.OPENAI_TIMEOUT)
@@ -557,9 +593,18 @@ class Pipeline:
                             json_data = json.loads(data)
                             delta = json_data.get('choices', [{}])[0].get('delta', {}).get('content', '')
                             if delta:
+                                output_content += delta
                                 yield delta
                         except json.JSONDecodeError:
                             pass
+            
+            # 统计输出token数量并更新统计信息
+            output_tokens = len(output_content)
+            self.token_stats["input_tokens"] += input_tokens
+            self.token_stats["output_tokens"] += output_tokens
+            self.token_stats["total_tokens"] += input_tokens + output_tokens
+            self.token_stats["api_calls"] += 1
+            
         except Exception as e:
             yield f"OpenAI流式API调用错误: {str(e)}"
 
@@ -854,9 +899,39 @@ class Pipeline:
                     }]
                 }
                 yield f"data: {json.dumps(chunk_data)}\n\n"
+            
+            # 输出token统计信息（流式模式）
+            stats_text = self._get_token_stats_text()
+            stats_chunk_data = {
+                'choices': [{
+                    'delta': {'content': stats_text},
+                    'finish_reason': None
+                }]
+            }
+            yield f"data: {json.dumps(stats_chunk_data)}\n\n"
         else:
             answer = self._call_openai_api(system_prompt, final_prompt)
-            yield answer
+            # 输出token统计信息（非流式模式）
+            stats_text = self._get_token_stats_text()
+            yield answer + stats_text
+
+    def _get_token_stats_text(self) -> str:
+        """格式化token统计信息"""
+        stats = self.token_stats
+        stats_text = f"""
+
+---
+
+**📊 Token使用统计**
+- 输入Token数: {stats['input_tokens']:,} 字符
+- 输出Token数: {stats['output_tokens']:,} 字符  
+- 总Token数: {stats['total_tokens']:,} 字符
+- API调用次数: {stats['api_calls']} 次
+- 平均每次调用: {stats['total_tokens']//max(stats['api_calls'], 1):,} 字符
+
+*注: Token数量基于字符数估算，实际使用量可能略有差异*
+"""
+        return stats_text
 
     def _build_conversation_context(self, user_message: str, messages: List[dict]) -> str:
         """构建对话上下文"""
@@ -901,7 +976,7 @@ class Pipeline:
 
     async def _react_loop(self, user_message: str, messages: List[dict], stream_mode: bool) -> AsyncGenerator[str, None]:
         """ReAct主循环"""
-        # 重置状态
+        # 重置状态和token统计
         self.react_state = {
             "papers_collected": [],  # 存储关键论文信息（字典格式）
             "query_history": [],
@@ -911,6 +986,14 @@ class Pipeline:
             "current_page": 1,  # 当前页码
             "current_page_size": 10,  # 当前页大小
             "query_pages": {}  # 记录每个查询词使用的页码 {query: page}
+        }
+        
+        # 重置token统计
+        self.token_stats = {
+            "input_tokens": 0, 
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "api_calls": 0
         }
         
         # 确保工具已加载
