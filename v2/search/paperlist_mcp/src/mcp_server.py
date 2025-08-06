@@ -179,6 +179,7 @@ def create_paper_info(paper: Dict[str, Any], detail: Dict[str, Any] = None) -> P
 @mcp.tool(tags={"search", "academic", "public"})
 async def search_papers(
     query: str,
+    page: int = 1,
     page_size: int = 20,
     year_min: int = -1,
     year_max: int = -1,
@@ -192,6 +193,7 @@ async def search_papers(
     
     Args:
         query: Search query string (paper title, keywords, etc.)
+        page: Page number to retrieve (1-based, default: 1)
         page_size: Number of papers to return (max 50)
         year_min: Minimum publication year (-1 for no limit)
         year_max: Maximum publication year (-1 for no limit)
@@ -203,38 +205,52 @@ async def search_papers(
         JSON response with paper information and abstracts
     """
     if ctx:
-        await ctx.info(f"Searching for papers: {query}")
+        await ctx.info(f"Searching for papers: {query} (page {page})")
     
     if page_size > 50:
         page_size = 50
         if ctx:
             await ctx.warning("Page size limited to 50")
     
+    if page < 1:
+        page = 1
+        if ctx:
+            await ctx.warning("Page number adjusted to 1")
+    
     try:
         client = await get_http_client()
         api = PaperlistAPI(client)
         
-        # Step 1: Search for papers
+        # Step 1: Search for papers (convert 1-based page to 0-based page_ndx)
         search_results = await api.search_papers(
             search_value=query,
             page_size=page_size,
+            page_ndx=page - 1,  # Convert 1-based to 0-based
             year_min=year_min,
             year_max=year_max,
             sort_by=sort_by
         )
         
         papers = search_results.get("page", [])
+        total_count = search_results.get("count", 0)
+        
         if not papers:
             return {
                 "success": False,
                 "query": query,
-                "total_count": 0,
+                "total_count": total_count,
                 "results": [],
                 "error": "No papers found",
-                "source": "paperlist"
+                "source": "paperlist",
+                "pagination": {
+                    "current_page": page,
+                    "page_size": page_size,
+                    "total_pages": 0,
+                    "has_next": False,
+                    "has_prev": page > 1,
+                    "results_count": 0
+                }
             }
-        
-        total_count = search_results.get("count", len(papers))
         
         # Step 2: Get detailed information if requested
         paper_infos = []
@@ -289,16 +305,29 @@ async def search_papers(
             results_dict.append(paper_dict)
         
         if ctx:
-            await ctx.info(f"Successfully returned {len(response.results)} papers")
+            await ctx.info(f"Successfully returned {len(response.results)} papers (page {page})")
         
-        # Return JSON response
+        # Calculate pagination info
+        total_pages = (total_count + page_size - 1) // page_size if total_count > 0 else 0
+        has_next = page < total_pages
+        has_prev = page > 1
+        
+        # Return JSON response with pagination info
         return {
             "success": response.success,
             "query": response.query,
             "total_count": response.total_count,
             "results": results_dict,
             "source": response.source,
-            "error": None
+            "error": None,
+            "pagination": {
+                "current_page": page,
+                "page_size": page_size,
+                "total_pages": total_pages,
+                "has_next": has_next,
+                "has_prev": has_prev,
+                "results_count": len(results_dict)
+            }
         }
         
     except Exception as e:

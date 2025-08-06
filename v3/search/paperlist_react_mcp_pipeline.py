@@ -1,17 +1,18 @@
 """
-参考v2\search\pubtator3_mcp_pipeline.py编写本pipeline
-使用ReAct模式，实现深度思考，并进行多轮pubtator3 MCP工具调用，最终给出回答。
+参考v2\search\paperlist_mcp_pipeline.py和v3\search\pubtator3_react_mcp_pipeline.py编写本pipeline
+使用ReAct模式，实现深度思考，并进行多轮paperlist MCP工具调用，最终给出回答。
 1.Reasoning阶段，根据用户问题、历史会话、当前获取到的论文信息进行自主思考判断
-  - 制定初次工具调用的Action, 调用pubtator3工具，获取论文信息
+  - 制定初次工具调用的Action, 调用paperlist工具，获取论文信息
 2.Action阶段，调用MCP工具，获取信息
 3.Observation阶段(每次Action后都需要进行观察)
   - 根据Action的执行结果，判断是否足够回答用户的问题(问题的相关性，进一步探索的必要性)
-  - 如果信息不充分，则制定新的Action(更新查询关键词、使用前一步检索到的信息更新查询关键词)，调用pubtator3工具，获取论文信息
+  - 如果信息不充分，则制定新的Action(更新查询关键词、使用前一步检索到的信息更新查询关键词)，调用paperlist工具，获取论文信息
   - 如果信息充分，则跳转答案生成阶段
 4.答案生成阶段，根据用户问题、历史会话、当前获取到的信息，生成最终答案，并返回给用户
 5.除了答案生成阶段，每个阶段使用_emit_processing方法，返回处理过程内容和思考，减少debug描述内容的输出
 6.对于Action和Observation阶段，_emit_processing采用动态递进的processing_stage
 7.注意代码的整洁简练，函数的解耦，避免重复代码和过多debug输出
+8.注意：paperlist MCP只能进行按标题的关键词搜索，请使用单个关键词或简单的关键词组合
 """
 
 import os
@@ -66,7 +67,7 @@ class Pipeline:
         MCP_TOOLS_EXPIRE_HOURS: int
 
     def __init__(self):
-        self.name = "PubTator3 ReAct MCP Academic Paper Pipeline"
+        self.name = "Paperlist ReAct MCP Academic Paper Pipeline"
         
         # MCP工具缓存
         self.mcp_tools = {}
@@ -101,21 +102,21 @@ class Pipeline:
                 "DEBUG_MODE": os.getenv("DEBUG_MODE", "false").lower() == "true",
                 "MAX_REACT_ITERATIONS": int(os.getenv("MAX_REACT_ITERATIONS", "10")),
                 
-                # MCP配置
-                "MCP_SERVER_URL": os.getenv("MCP_SERVER_URL", "http://localhost:8991"),
+                # MCP配置 - 默认指向paperlist服务
+                "MCP_SERVER_URL": os.getenv("MCP_SERVER_URL", "http://localhost:8990"),
                 "MCP_TIMEOUT": int(os.getenv("MCP_TIMEOUT", "30")),
                 "MCP_TOOLS_EXPIRE_HOURS": int(os.getenv("MCP_TOOLS_EXPIRE_HOURS", "12")),
             }
         )
 
     async def on_startup(self):
-        print(f"PubTator3 ReAct MCP Pipeline启动: {__name__}")
+        print(f"Paperlist ReAct MCP Pipeline启动: {__name__}")
         if not self.valves.OPENAI_API_KEY:
             print("❌ 缺少OpenAI API密钥")
         print(f"🔗 MCP服务器: {self.valves.MCP_SERVER_URL}")
 
     async def on_shutdown(self):
-        print(f"PubTator3 ReAct MCP Pipeline关闭: {__name__}")
+        print(f"Paperlist ReAct MCP Pipeline关闭: {__name__}")
 
     def _emit_processing(self, content: str, stage: str = "processing") -> Generator[dict, None, None]:
         """发送处理过程内容"""
@@ -149,7 +150,7 @@ class Pipeline:
                         "roots": {"listChanged": True}
                     },
                     "clientInfo": {
-                        "name": "PubTator3 ReAct MCP Pipeline",
+                        "name": "Paperlist ReAct MCP Pipeline",
                         "version": "1.0.0"
                     }
                 },
@@ -244,7 +245,7 @@ class Pipeline:
         if not self.valves.MCP_SERVER_URL:
             raise Exception("MCP服务器地址未配置")
         
-        start_msg = f"🔍 正在发现PubTator3 MCP工具..."
+        start_msg = f"🔍 正在发现Paperlist MCP工具..."
         if stream_mode:
             for chunk in self._emit_processing(start_msg, "mcp_discovery"):
                 yield f'data: {json.dumps(chunk)}\n\n'
@@ -323,7 +324,7 @@ class Pipeline:
                         self.tools_loaded = True
                         self.tools_loaded_time = time.time()  # 记录工具加载时间
                         
-                        final_msg = f"✅ 发现 {len(self.mcp_tools)} 个PubTator3 MCP工具"
+                        final_msg = f"✅ 发现 {len(self.mcp_tools)} 个Paperlist MCP工具"
                         if len(self.mcp_tools) > 0:
                             final_msg += f": {', '.join(self.mcp_tools.keys())}"
                         
@@ -338,7 +339,7 @@ class Pipeline:
                         raise Exception(f"HTTP {response.status}: {error_text}")
                         
         except Exception as e:
-            error_msg = f"❌ PubTator3 MCP工具发现失败: {e}"
+            error_msg = f"❌ Paperlist MCP工具发现失败: {e}"
             if stream_mode:
                 for chunk in self._emit_processing(error_msg, "mcp_discovery"):
                     yield f'data: {json.dumps(chunk)}\n\n'
@@ -369,7 +370,7 @@ class Pipeline:
             reason = f"工具已过期 ({expired_hours:.1f} 小时前加载)"
         
         if need_reload:
-            reload_msg = f"🔄 {reason}，正在重新发现PubTator3 MCP工具..."
+            reload_msg = f"🔄 {reason}，正在重新发现Paperlist MCP工具..."
             if stream_mode:
                 for chunk in self._emit_processing(reload_msg, "mcp_discovery"):
                     yield f'data: {json.dumps(chunk)}\n\n'
@@ -564,11 +565,9 @@ class Pipeline:
             yield f"OpenAI流式API调用错误: {str(e)}"
 
     async def _reasoning_phase(self, user_message: str, messages: List[dict], stream_mode: bool) -> AsyncGenerator[tuple, None]:
-        """ReAct推理阶段"""
+        """ReAct推理阶段 - 针对paperlist搜索特点进行优化"""
         context = self._build_conversation_context(user_message, messages)
         used_queries = list(self.react_state['query_terms_used'])
-        
-
         
         reasoning_prompt = f"""你是专业的学术论文搜索助手。请基于用户问题和已有信息制定搜索策略。
 
@@ -576,36 +575,41 @@ class Pipeline:
 对话历史: {context}
 已使用查询词: {used_queries}
 
+**重要说明：**
+- 本系统使用的是paperlist MCP工具，主要针对论文标题进行关键词搜索
+- 相比pubtator3，paperlist更适合精确的单词或简短词组搜索
+- 建议使用单个关键词或2-3个关键词的简单组合
+
 **分析任务：**
 1. 判断是否需要搜索论文？
 2. 如果需要搜索，从用户问题中提取核心专业名词作为查询关键词
 3. 避免重复已使用的查询词: {used_queries}
 
-**查询词要求：**
-- 从用户问题中提取的核心专业名词
-- 使用标准英文医学/生物/化学术语
-- 可以是单个关键词或多个关键词的空格组合
-- 多个关键词用空格分隔，系统会搜索包含这些词的摘要
-- 不使用AND、OR、NOT等布尔操作符
+**查询词要求（适配paperlist特点）：**
+- 优先使用单个核心关键词
+- 可以是2-3个相关词的简单组合，用空格分隔
+- 使用标准英文学术术语
+- 避免复杂的长查询语句
+- 针对论文标题搜索优化，选择可能出现在标题中的关键词
 
 **示例：**
-用户问题"facial cleanser对skin health的影响" → 查询: "facial cleanser skin health"
-用户问题"维生素C对皮肤抗衰老的作用" → 查询: "vitamin C anti-aging"
-用户问题"probiotics在dermatology中的应用" → 查询: "probiotics dermatology"
-用户问题"ceramides的保湿机制" → 查询: "ceramides moisturizing mechanism"
+用户问题"机器学习在医学影像中的应用" → 查询: "machine learning medical imaging" 或 "deep learning radiology"
+用户问题"自然语言处理最新进展" → 查询: "natural language processing" 或 "NLP transformer"
+用户问题"区块链技术研究" → 查询: "blockchain" 或 "cryptocurrency"
+用户问题"人工智能伦理问题" → 查询: "AI ethics" 或 "artificial intelligence ethics"
 
 回复格式：
 ```json
 {{
     "need_search": true/false,
-    "query": "从用户问题提取的专业名词",
+    "query": "适合paperlist搜索的简洁关键词",
     "reasoning": "基于用户问题和已有信息的分析",
     "sufficient_info": true/false
 }}
 ```"""
 
         if stream_mode:
-            for chunk in self._emit_processing("分析用户问题，基于已有信息制定搜索策略...", "reasoning"):
+            for chunk in self._emit_processing("分析用户问题，制定适合paperlist搜索的策略...", "reasoning"):
                 yield ("processing", f'data: {json.dumps(chunk)}\n\n')
         
         decision = self._call_openai_api("", reasoning_prompt, json_mode=True)
@@ -622,7 +626,7 @@ class Pipeline:
             yield ("decision", {"need_search": False, "sufficient_info": True, "reasoning": "解析失败"})
 
     async def _action_phase(self, query: str, page: int = 1, page_size: int = 10, stream_mode: bool = False) -> AsyncGenerator[tuple, None]:
-        """ReAct动作阶段"""
+        """ReAct动作阶段 - 使用paperlist工具"""
         # 更新当前页码状态
         self.react_state["current_page"] = page
         self.react_state["current_page_size"] = page_size
@@ -633,18 +637,18 @@ class Pipeline:
             for chunk in self._emit_processing(action_msg, "action"):
                 yield ("processing", f'data: {json.dumps(chunk)}\n\n')
         
-        # 调用pubtator3工具搜索论文
+        # 调用paperlist工具搜索论文
         tool_args = {
             "query": query,
-            "page": page,
             "page_size": page_size,
-            "include_full_abstracts": True
+            "sort_by": "relevance",  # 按引用数降序排序
+            "include_abstracts": True  # 包含摘要信息
         }
         
         # 获取原始工具调用结果
-        tool_result = await self._execute_mcp_tool("search_papers_by_abstract", tool_args)
+        tool_result = await self._execute_mcp_tool("search_papers", tool_args)
 
-        #格式美化
+        # 格式美化
         try:
             json_result = json.loads(tool_result)
             tool_result = json.dumps(json_result, ensure_ascii=False, indent=2)
@@ -664,9 +668,9 @@ class Pipeline:
         yield ("result", tool_result)
 
     async def _observation_phase(self, action_result: str, query: str, user_message: str, stream_mode: bool) -> AsyncGenerator[tuple, None]:
-        """ReAct观察阶段"""
+        """ReAct观察阶段 - 针对paperlist结果格式进行分析"""
         if stream_mode:
-            for chunk in self._emit_processing("观察搜索结果，分析摘要内容，提取新查询关键词...", "observation"):
+            for chunk in self._emit_processing("观察搜索结果，分析论文内容，提取新查询关键词...", "observation"):
                 yield ("processing", f'data: {json.dumps(chunk)}\n\n')
         
         # 构建观察prompt
@@ -676,7 +680,7 @@ class Pipeline:
         current_page = self.react_state.get('current_page', 1)
         current_page_size = self.react_state.get('current_page_size', 10)
         
-        observation_prompt = f"""你是专业的学术论文分析专家。请基于搜索结果中的论文摘要内容进行深度分析：
+        observation_prompt = f"""你是专业的学术论文分析专家。请基于paperlist搜索结果进行深度分析：
 
 用户问题: {user_message}  
 使用的查询词: {query}
@@ -691,37 +695,35 @@ class Pipeline:
 
 **关键任务：**
 1. 自主分析当前搜索结果的原始JSON数据，判断是否成功找到相关论文
-2. 仔细分析JSON中论文的摘要内容，识别专业术语、化学成分、生物学概念、技术方法等
-3. 从摘要内容中识别与用户问题直接相关的**名词**关键词
-4. 记录高相关度的关键论文信息（标题、作者、DOI、摘要、相关性权重）
-5. 评估当前页结果的质量和数量，决定是否需要翻页获取更多论文
-6. 选择能够进一步深入探索相关主题的新查询词
-7. 如果从当前摘要中无法找到新的有用关键词，优先考虑使用历史未使用的关键词: {unused_keywords}
-8. 避免使用已经查询过的词: {used_queries}
+2. 查看JSON中的"pagination"字段，了解分页信息（current_page、total_pages、has_next、has_prev等）
+3. 仔细分析JSON中"results"数组内论文的标题、作者、摘要等内容，识别专业术语和关键概念
+4. 从论文内容中识别与用户问题直接相关的**关键词**
+5. 记录高相关度的关键论文信息（标题、作者、摘要、相关性权重）
+6. 基于分页信息和当前页结果质量，决定是否需要翻页获取更多论文
+7. 选择能够进一步深入探索相关主题的新查询词
 
-**查询词选择策略：**
-- 优先级1: 从当前摘要中提取的新专业名词
+**针对paperlist的查询词选择策略：**
+- 优先使用单个核心关键词（如"blockchain", "AI", "deep learning"）
+- 可以使用2-3个词的简洁组合（如"machine learning", "natural language processing"）
+- 避免复杂长句和多词组合
+- 选择可能出现在论文标题中的专业术语
+- 优先级1: 从当前论文内容中提取的新专业名词
 - 优先级2: 历史未使用的关键词（如果与用户问题相关）
-- 可以是单个专业名词或多个关键词的空格组合
-- 多个关键词用空格分隔，系统会搜索包含这些词的摘要
-- 不使用AND、OR、NOT等布尔操作符
 
-**查询词构造示例：**
-- 单个术语: "ceramides", "retinol", "hyaluronic acid"
-- 组合查询: "vitamin C collagen", "probiotics dermatology"
-- 相关术语组合: "vitamin C ascorbic acid", "retinol tretinoin"
-- 多词组合: "anti-aging peptides", "skin barrier function"
-- 机制相关: "ceramides skin moisture", "collagen synthesis aging"
+**查询词示例：**
+- 单个术语: "blockchain", "transformer", "BERT", "GAN"
+- 简洁组合: "deep learning", "computer vision", "reinforcement learning"
+- 相关领域: "medical AI", "quantum computing", "edge computing"
 
 **翻页策略：**
-- 如果当前页论文数量少于期望数量，且内容质量高，考虑翻页获取更多论文
-- 如果当前页论文相关性较高，可以翻页寻找更多相关研究
-- 翻页仅适用于当前查询词，不要频繁翻页避免效率低下
-- 页大小可以调整（建议5-20篇），默认10篇
+- 检查JSON中pagination.has_next字段判断是否还有下一页
+- 如果当前页论文相关性较高且has_next=true，可考虑翻页获取更多相关研究  
+- 如果当前页论文数量较少但质量高，且has_next=true，建议翻页
+- 使用pagination.current_page + 1作为next_page值
+- 翻页仅适用于当前查询词，避免频繁翻页影响效率
 
 **关键论文筛选标准：**
-- 仔细分析每篇论文摘要与用户问题的相关程度
-- 基于摘要内容评估论文对回答用户问题的价值
+- 基于论文标题、摘要内容评估与用户问题的相关程度
 - 记录所有找到的论文，但按相关性权重排序
 - 相关性权重应反映论文对用户问题的直接相关程度（0.0-1.0）
 
@@ -731,24 +733,25 @@ class Pipeline:
     "relevance_score": 0-10,
     "sufficient_info": true/false,
     "need_more_search": true/false,
-    "suggested_query": "新查询词或历史未使用关键词(if needed)",
-    "query_source": "current_abstract/historical_keywords",
+    "suggested_query": "单个关键词或简洁组合(if needed)",
+    "query_source": "current_papers/historical_keywords",
     "next_page": 0,
     "page_size": 10,
     "need_pagination": true/false,
     "pagination_reason": "翻页原因说明(if needed)",
-    "extracted_keywords": ["从当前摘要中识别的关键术语列表"],
+    "extracted_keywords": ["从当前论文中识别的关键术语列表"],
     "key_papers": [
         {{
             "title": "论文标题",
             "authors": "作者列表", 
-            "doi": "DOI或链接",
+            "year": "发表年份",
+            "venue": "期刊/会议",
             "abstract": "关键摘要内容（精简版）",
             "relevance_weight": 0.0-1.0,
             "key_findings": "关键发现或结论"
         }}
     ],
-    "observation": "基于摘要内容的详细分析"
+    "observation": "基于论文内容的详细分析"
 }}
 ```"""
 
@@ -790,14 +793,14 @@ class Pipeline:
                 
                 if key_papers:
                     obs_content += f"\n发现 {len(key_papers)} 篇关键论文"
-                    num_selected =min(max(5, int(len(key_papers) * 0.8)),len(key_papers)) #
+                    num_selected = min(max(5, int(len(key_papers) * 0.8)), len(key_papers))
                     obs_content += f"，按相关性选择({num_selected}篇)已收录"
                 
-                query_source = observation_data.get('query_source', 'current_abstract')
+                query_source = observation_data.get('query_source', 'current_papers')
                 if query_source == 'historical_keywords':
                     obs_content += f"\n建议查询词来源：历史关键词重用"
                 else:
-                    obs_content += f"\n建议查询词来源：当前摘要提取"
+                    obs_content += f"\n建议查询词来源：当前论文提取"
                 
                 # 显示翻页信息
                 if observation_data.get('need_pagination', False):
@@ -835,7 +838,7 @@ class Pipeline:
 5. **结构化回答** - 按逻辑顺序组织内容，便于理解
 6. **完整性** - 确保回答涵盖用户问题的各个方面
 
-请基于以上所有论文信息提供全面、详细、准确的回答。包含相关论文的完整引用信息（标题、作者、DOI等）。
+请基于以上所有论文信息提供全面、详细、准确的回答。包含相关论文的完整引用信息（标题、作者、年份等）。
 如果有DOI或链接，请使用markdown格式输出可点击链接。"""
 
         system_prompt = """你是专业的学术论文分析专家。你的任务是：
@@ -884,8 +887,10 @@ class Pipeline:
             summary += f"=== 关键论文 {i} ===\n"
             summary += f"标题: {paper.get('title', '未知标题')}\n"
             summary += f"作者: {paper.get('authors', '未知作者')}\n"
-            if paper.get('doi'):
-                summary += f"DOI: {paper.get('doi')}\n"
+            if paper.get('year'):
+                summary += f"年份: {paper.get('year')}\n"
+            if paper.get('venue'):
+                summary += f"期刊/会议: {paper.get('venue')}\n"
             summary += f"相关性权重: {paper.get('relevance_weight', 1.0)}\n"
             if paper.get('key_findings'):
                 summary += f"关键发现: {paper.get('key_findings')}\n"
@@ -918,7 +923,7 @@ class Pipeline:
             async for tools_output in self._ensure_tools_loaded(stream_mode):
                 yield tools_output
         except Exception as e:
-            error_msg = f"❌ PubTator3 MCP工具加载失败: {str(e)}"
+            error_msg = f"❌ Paperlist MCP工具加载失败: {str(e)}"
             if stream_mode:
                 for chunk in self._emit_processing(error_msg, "mcp_discovery"):
                     yield f'data: {json.dumps(chunk)}\n\n'
