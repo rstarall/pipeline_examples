@@ -107,7 +107,7 @@ class Pipeline:
                 # Pipeline配置
                 "ENABLE_STREAMING": os.getenv("ENABLE_STREAMING", "true").lower() == "true",
                 "DEBUG_MODE": os.getenv("DEBUG_MODE", "false").lower() == "true",
-                "MAX_REACT_ITERATIONS": int(os.getenv("MAX_REACT_ITERATIONS", "10")),
+                "MAX_REACT_ITERATIONS": int(os.getenv("MAX_REACT_ITERATIONS", "5")),
                 
                 # MCP配置
                 "MCP_SERVER_URL": os.getenv("MCP_SERVER_URL", "http://localhost:8991"),
@@ -788,7 +788,7 @@ class Pipeline:
             "title": "论文标题",
             "authors": "作者列表", 
             "doi": "DOI或链接",
-            "abstract": "关键摘要内容（精简版）",
+            "abstract": "关键摘要内容",
             "relevance_weight": 0.0-1.0,
             "key_findings": "关键发现或结论"
         }}

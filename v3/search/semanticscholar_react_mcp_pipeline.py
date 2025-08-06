@@ -1,18 +1,18 @@
 """
-参考v2\search\paperlist_mcp_pipeline.py和v3\search\pubtator3_react_mcp_pipeline.py编写本pipeline
-使用ReAct模式，实现深度思考，并进行多轮paperlist MCP工具调用，最终给出回答。
+基于v2\search\semanticscholar_mcp\src\mcp_server.py，参考v3\search\paperlist_react_mcp_pipeline.py编写本pipeline
+使用ReAct模式，实现深度思考，并进行多轮Semantic Scholar MCP工具调用，最终给出回答。
 1.Reasoning阶段，根据用户问题、历史会话、当前获取到的论文信息进行自主思考判断
-  - 制定初次工具调用的Action, 调用paperlist工具，获取论文信息
+  - 制定初次工具调用的Action, 调用semantic scholar工具，获取论文信息
 2.Action阶段，调用MCP工具，获取信息
 3.Observation阶段(每次Action后都需要进行观察)
   - 根据Action的执行结果，判断是否足够回答用户的问题(问题的相关性，进一步探索的必要性)
-  - 如果信息不充分，则制定新的Action(更新查询关键词、使用前一步检索到的信息更新查询关键词)，调用paperlist工具，获取论文信息
+  - 如果信息不充分，则制定新的Action(更新查询关键词、使用前一步检索到的信息更新查询关键词)，调用semantic scholar工具，获取论文信息
   - 如果信息充分，则跳转答案生成阶段
 4.答案生成阶段，根据用户问题、历史会话、当前获取到的信息，生成最终答案，并返回给用户
 5.除了答案生成阶段，每个阶段使用_emit_processing方法，返回处理过程内容和思考，减少debug描述内容的输出
 6.对于Action和Observation阶段，_emit_processing采用动态递进的processing_stage
 7.注意代码的整洁简练，函数的解耦，避免重复代码和过多debug输出
-8.注意：paperlist MCP只能进行按标题的关键词搜索，请使用单个关键词或简单的关键词组合
+8.注意：Semantic Scholar MCP工具支持复杂的学术查询，可以使用专业术语、作者名称、期刊名等
 """
 
 import os
@@ -67,7 +67,7 @@ class Pipeline:
         MCP_TOOLS_EXPIRE_HOURS: int
 
     def __init__(self):
-        self.name = "Paperlist ReAct MCP Academic Paper Pipeline"
+        self.name = "Semantic Scholar ReAct MCP Academic Paper Pipeline"
         
         # 初始化token统计
         self.token_stats = {
@@ -90,9 +90,9 @@ class Pipeline:
             "query_terms_used": set(),  # 已使用的查询词集合
             "extracted_keywords_history": set(),  # 历史提取的关键词集合
             "current_iteration": 0,
-            "current_page": 1,  # 当前页码
-            "current_page_size": 10,  # 当前页大小
-            "query_pages": {}  # 记录每个查询词使用的页码 {query: page}
+            "current_offset": 0,  # 当前偏移量
+            "current_limit": 10,  # 当前每页数量
+            "query_offsets": {}  # 记录每个查询词使用的偏移量 {query: offset}
         }
         
         self.valves = self.Valves(
@@ -108,23 +108,23 @@ class Pipeline:
                 # Pipeline配置
                 "ENABLE_STREAMING": os.getenv("ENABLE_STREAMING", "true").lower() == "true",
                 "DEBUG_MODE": os.getenv("DEBUG_MODE", "false").lower() == "true",
-                "MAX_REACT_ITERATIONS": int(os.getenv("MAX_REACT_ITERATIONS", "5")),
+                "MAX_REACT_ITERATIONS": int(os.getenv("MAX_REACT_ITERATIONS", "10")),
                 
-                # MCP配置 - 默认指向paperlist服务
-                "MCP_SERVER_URL": os.getenv("MCP_SERVER_URL", "http://localhost:8990"),
+                # MCP配置 - 默认指向semantic scholar服务
+                "MCP_SERVER_URL": os.getenv("MCP_SERVER_URL", "http://localhost:8992"),
                 "MCP_TIMEOUT": int(os.getenv("MCP_TIMEOUT", "30")),
                 "MCP_TOOLS_EXPIRE_HOURS": int(os.getenv("MCP_TOOLS_EXPIRE_HOURS", "12")),
             }
         )
 
     async def on_startup(self):
-        print(f"Paperlist ReAct MCP Pipeline启动: {__name__}")
+        print(f"Semantic Scholar ReAct MCP Pipeline启动: {__name__}")
         if not self.valves.OPENAI_API_KEY:
             print("❌ 缺少OpenAI API密钥")
         print(f"🔗 MCP服务器: {self.valves.MCP_SERVER_URL}")
 
     async def on_shutdown(self):
-        print(f"Paperlist ReAct MCP Pipeline关闭: {__name__}")
+        print(f"Semantic Scholar ReAct MCP Pipeline关闭: {__name__}")
 
     def _emit_processing(self, content: str, stage: str = "processing") -> Generator[dict, None, None]:
         """发送处理过程内容"""
@@ -158,7 +158,7 @@ class Pipeline:
                         "roots": {"listChanged": True}
                     },
                     "clientInfo": {
-                        "name": "Paperlist ReAct MCP Pipeline",
+                        "name": "Semantic Scholar ReAct MCP Pipeline",
                         "version": "1.0.0"
                     }
                 },
@@ -253,7 +253,7 @@ class Pipeline:
         if not self.valves.MCP_SERVER_URL:
             raise Exception("MCP服务器地址未配置")
         
-        start_msg = f"🔍 正在发现Paperlist MCP工具..."
+        start_msg = f"🔍 正在发现Semantic Scholar MCP工具..."
         if stream_mode:
             for chunk in self._emit_processing(start_msg, "mcp_discovery"):
                 yield f'data: {json.dumps(chunk)}\n\n'
@@ -332,7 +332,7 @@ class Pipeline:
                         self.tools_loaded = True
                         self.tools_loaded_time = time.time()  # 记录工具加载时间
                         
-                        final_msg = f"✅ 发现 {len(self.mcp_tools)} 个Paperlist MCP工具"
+                        final_msg = f"✅ 发现 {len(self.mcp_tools)} 个Semantic Scholar MCP工具"
                         if len(self.mcp_tools) > 0:
                             final_msg += f": {', '.join(self.mcp_tools.keys())}"
                         
@@ -347,7 +347,7 @@ class Pipeline:
                         raise Exception(f"HTTP {response.status}: {error_text}")
                         
         except Exception as e:
-            error_msg = f"❌ Paperlist MCP工具发现失败: {e}"
+            error_msg = f"❌ Semantic Scholar MCP工具发现失败: {e}"
             if stream_mode:
                 for chunk in self._emit_processing(error_msg, "mcp_discovery"):
                     yield f'data: {json.dumps(chunk)}\n\n'
@@ -378,7 +378,7 @@ class Pipeline:
             reason = f"工具已过期 ({expired_hours:.1f} 小时前加载)"
         
         if need_reload:
-            reload_msg = f"🔄 {reason}，正在重新发现Paperlist MCP工具..."
+            reload_msg = f"🔄 {reason}，正在重新发现Semantic Scholar MCP工具..."
             if stream_mode:
                 for chunk in self._emit_processing(reload_msg, "mcp_discovery"):
                     yield f'data: {json.dumps(chunk)}\n\n'
@@ -610,7 +610,7 @@ class Pipeline:
             yield f"OpenAI流式API调用错误: {str(e)}"
 
     async def _reasoning_phase(self, user_message: str, messages: List[dict], stream_mode: bool) -> AsyncGenerator[tuple, None]:
-        """ReAct推理阶段 - 针对paperlist搜索特点进行优化"""
+        """ReAct推理阶段 - 针对Semantic Scholar搜索特点进行优化"""
         context = self._build_conversation_context(user_message, messages)
         used_queries = list(self.react_state['query_terms_used'])
         
@@ -621,40 +621,40 @@ class Pipeline:
 已使用查询词: {used_queries}
 
 **重要说明：**
-- 本系统使用的是paperlist MCP工具，主要针对论文标题进行关键词搜索
-- 相比pubtator3，paperlist更适合精确的单词或简短词组搜索
-- 建议使用单个关键词或2-3个关键词的简单组合
+- 本系统使用的是Semantic Scholar MCP工具，这是一个强大的学术搜索引擎
+- 支持复杂的学术查询，包括专业术语、作者名称、期刊名称等
+- 返回结果包含完整的论文元数据：标题、作者、摘要、引用数、期刊等
 
 **分析任务：**
 1. 判断是否需要搜索论文？
-2. 如果需要搜索，从用户问题中提取核心专业名词作为查询关键词
+2. 如果需要搜索，从用户问题中提取核心学术查询关键词
 3. 避免重复已使用的查询词: {used_queries}
 
-**查询词要求（适配paperlist特点）：**
-- 优先使用单个核心关键词
-- 可以是2-3个相关词的简单组合，用空格分隔
-- 使用标准英文学术术语
-- 避免复杂的长查询语句
-- 针对论文标题搜索优化，选择可能出现在标题中的关键词
+**查询词要求（适配Semantic Scholar特点）：**
+- 可以使用复杂的学术术语组合
+- 支持作者名称查询（如 "author:Smith machine learning"）
+- 支持期刊名称查询（如 "venue:Nature artificial intelligence"）
+- 支持具体技术术语（如 "transformer attention mechanism"）
+- 支持多词组合查询（如 "deep learning medical image segmentation"）
 
 **示例：**
-用户问题"机器学习在医学影像中的应用" → 查询: "machine learning medical imaging" 或 "deep learning radiology"
-用户问题"自然语言处理最新进展" → 查询: "natural language processing" 或 "NLP transformer"
-用户问题"区块链技术研究" → 查询: "blockchain" 或 "cryptocurrency"
-用户问题"人工智能伦理问题" → 查询: "AI ethics" 或 "artificial intelligence ethics"
+用户问题"机器学习在医学影像中的应用" → 查询: "machine learning medical imaging" 或 "deep learning medical image"
+用户问题"Transformer架构的最新研究" → 查询: "transformer architecture attention mechanism"
+用户问题"自然语言处理的BERT模型" → 查询: "BERT natural language processing"
+用户问题"Geoffrey Hinton的深度学习研究" → 查询: "author:Geoffrey Hinton deep learning"
 
 回复格式：
 ```json
 {{
     "need_search": true/false,
-    "query": "适合paperlist搜索的简洁专业学术关键词",
+    "query": "适合Semantic Scholar搜索的学术查询词",
     "reasoning": "基于用户问题和已有信息的分析",
     "sufficient_info": true/false
 }}
 ```"""
 
         if stream_mode:
-            for chunk in self._emit_processing("分析用户问题，制定适合paperlist搜索的策略...", "reasoning"):
+            for chunk in self._emit_processing("分析用户问题，制定适合Semantic Scholar搜索的策略...", "reasoning"):
                 yield ("processing", f'data: {json.dumps(chunk)}\n\n')
         
         decision = self._call_openai_api("", reasoning_prompt, json_mode=True)
@@ -670,25 +670,23 @@ class Pipeline:
         except json.JSONDecodeError:
             yield ("decision", {"need_search": False, "sufficient_info": True, "reasoning": "解析失败"})
 
-    async def _action_phase(self, query: str, page: int = 1, page_size: int = 10, stream_mode: bool = False) -> AsyncGenerator[tuple, None]:
-        """ReAct动作阶段 - 使用paperlist工具"""
-        # 更新当前页码状态
-        self.react_state["current_page"] = page
-        self.react_state["current_page_size"] = page_size
-        self.react_state["query_pages"][query] = page
+    async def _action_phase(self, query: str, limit: int = 10, offset: int = 0, stream_mode: bool = False) -> AsyncGenerator[tuple, None]:
+        """ReAct动作阶段 - 使用Semantic Scholar工具"""
+        # 更新当前偏移量状态
+        self.react_state["current_offset"] = offset
+        self.react_state["current_limit"] = limit
+        self.react_state["query_offsets"][query] = offset
         
         if stream_mode:
-            action_msg = f"执行论文搜索：{query} (第{page}页，每页{page_size}篇)"
+            action_msg = f"执行论文搜索：{query} (偏移量{offset}，限制{limit}篇)"
             for chunk in self._emit_processing(action_msg, "action"):
                 yield ("processing", f'data: {json.dumps(chunk)}\n\n')
         
-        # 调用paperlist工具搜索论文
+        # 调用semantic scholar工具搜索论文
         tool_args = {
             "query": query,
-            "page": page,
-            "page_size": page_size,
-            "sort_by": "relevance",  # 按引用数降序排序
-            "include_abstracts": True  # 包含摘要信息
+            "limit": limit,
+            "offset": offset
         }
         
         # 获取原始工具调用结果
@@ -714,7 +712,7 @@ class Pipeline:
         yield ("result", tool_result)
 
     async def _observation_phase(self, action_result: str, query: str, user_message: str, stream_mode: bool) -> AsyncGenerator[tuple, None]:
-        """ReAct观察阶段 - 针对paperlist结果格式进行分析"""
+        """ReAct观察阶段 - 针对Semantic Scholar结果格式进行分析"""
         if stream_mode:
             for chunk in self._emit_processing("观察搜索结果，分析论文内容，提取新查询关键词...", "observation"):
                 yield ("processing", f'data: {json.dumps(chunk)}\n\n')
@@ -723,14 +721,14 @@ class Pipeline:
         used_queries = list(self.react_state['query_terms_used'])
         extracted_history = list(self.react_state['extracted_keywords_history'])
         unused_keywords = [kw for kw in extracted_history if kw.lower() not in self.react_state['query_terms_used']]
-        current_page = self.react_state.get('current_page', 1)
-        current_page_size = self.react_state.get('current_page_size', 10)
+        current_offset = self.react_state.get('current_offset', 0)
+        current_limit = self.react_state.get('current_limit', 10)
         
-        observation_prompt = f"""你是专业的学术论文分析专家。请基于paperlist搜索结果进行深度分析：
+        observation_prompt = f"""你是专业的学术论文分析专家。请基于Semantic Scholar搜索结果进行深度分析：
 
 用户问题: {user_message}  
 使用的查询词: {query}
-当前页码: {current_page} (每页{current_page_size}篇)
+当前偏移量: {current_offset} (限制{current_limit}篇)
 当前迭代: {self.react_state['current_iteration']}/{self.valves.MAX_REACT_ITERATIONS}
 已使用查询词: {used_queries}
 历史提取的关键词: {extracted_history}
@@ -741,35 +739,38 @@ class Pipeline:
 
 **关键任务：**
 1. 自主分析当前搜索结果的原始JSON数据，判断是否成功找到相关论文
-2. 查看JSON中的"pagination"字段，了解分页信息（current_page、total_pages、has_next、has_prev等）
-3. 仔细分析JSON中"results"数组内论文的标题、作者、摘要等内容，识别专业术语和关键概念
-4. 从论文内容中识别与用户问题直接相关的**关键词**
+2. 查看JSON中的success字段，了解搜索是否成功
+3. 仔细分析JSON中"results"数组内论文的标题、作者、摘要、引用数等内容
+4. 从论文内容中识别与用户问题直接相关的**关键词**和**专业术语**
 5. 记录高相关度的关键论文信息（标题、作者、摘要、相关性权重）
-6. 基于分页信息和当前页结果质量，决定是否需要翻页获取更多论文
+6. 基于total_count判断是否还有更多结果需要获取
 7. 选择能够进一步深入探索相关主题的新查询词
 
-**针对paperlist的查询词选择策略：**
-- 优先使用单个核心关键词（如"blockchain", "AI", "deep learning"）
-- 可以使用2-3个词的简洁组合（如"machine learning", "natural language processing"）
-- 避免复杂长句和多词组合
-- 选择可能出现在论文标题中的专业术语
+**针对Semantic Scholar的查询词选择策略：**
+- 可以使用复杂的学术术语组合
+- 支持作者查询：author:"作者名" + 主题
+- 支持期刊查询：venue:"期刊名" + 主题  
+- 支持具体技术术语和方法名称
 - 优先级1: 从当前论文内容中提取的新专业名词
-- 优先级2: 历史未使用的关键词（如果与用户问题相关）
+- 优先级2: 结合作者或期刊的深度查询
+- 优先级3: 历史未使用的关键词（如果与用户问题相关）
 
 **查询词示例：**
-- 单个术语: "blockchain", "transformer", "BERT", "GAN"
-- 简洁组合: "deep learning", "computer vision", "reinforcement learning"
-- 相关领域: "medical AI", "quantum computing", "edge computing"
+- 复合查询: "transformer attention mechanism NLP"
+- 作者查询: "author:Yoshua Bengio deep learning"
+- 期刊查询: "venue:Nature machine learning medical"
+- 技术查询: "BERT fine-tuning language model"
+- 领域查询: "computer vision object detection CNN"
 
-**翻页策略：**
-- 检查JSON中pagination.has_next字段判断是否还有下一页
-- 如果当前页论文相关性较高且has_next=true，可考虑翻页获取更多相关研究  
-- 如果当前页论文数量较少但质量高，且has_next=true，建议翻页
-- 使用pagination.current_page + 1作为next_page值
-- 翻页仅适用于当前查询词，避免频繁翻页影响效率
+**分页策略：**
+- 基于total_count判断是否还有更多结果
+- 如果当前结果相关性高且total_count > current_offset + current_limit，可考虑获取更多
+- 使用current_offset + current_limit作为new_offset值
+- 分页适用于当前查询词，避免频繁分页影响效率
 
 **关键论文筛选标准：**
-- 基于论文标题、摘要内容评估与用户问题的相关程度
+- 基于论文标题、摘要、引用数评估与用户问题的相关程度
+- 优先考虑引用数较高的重要论文
 - 记录所有找到的论文，但按相关性权重排序
 - 相关性权重应反映论文对用户问题的直接相关程度（0.0-1.0）
 
@@ -779,12 +780,12 @@ class Pipeline:
     "relevance_score": 0-10,
     "sufficient_info": true/false,
     "need_more_search": true/false,
-    "suggested_query": "单个关键词或简洁组合(if needed)",
-    "query_source": "current_papers/historical_keywords",
-    "next_page": 0,
-    "page_size": 10,
+    "suggested_query": "新的学术查询词(if needed)",
+    "query_source": "current_papers/author_focus/venue_focus/historical_keywords",
+    "new_offset": 0,
+    "limit": 10,
     "need_pagination": true/false,
-    "pagination_reason": "翻页原因说明(if needed)",
+    "pagination_reason": "分页原因说明(if needed)",
     "extracted_keywords": ["从当前论文中识别的关键术语列表"],
     "key_papers": [
         {{
@@ -793,6 +794,7 @@ class Pipeline:
             "year": "发表年份",
             "venue": "期刊/会议",
             "abstract": "关键摘要内容",
+            "citation_count": "引用数",
             "relevance_weight": 0.0-1.0,
             "key_findings": "关键发现或结论"
         }}
@@ -814,7 +816,7 @@ class Pipeline:
             # 处理关键论文信息，更新papers_collected
             key_papers = observation_data.get('key_papers', [])
             if key_papers:
-                # 按相关性权重排序，选择前60%的论文
+                # 按相关性权重排序，选择前80%的论文
                 papers_with_weights = []
                 for paper in key_papers:
                     relevance_weight = paper.get('relevance_weight', 0.8)  # 默认权重0.8
@@ -843,17 +845,20 @@ class Pipeline:
                     obs_content += f"，按相关性选择({num_selected}篇)已收录"
                 
                 query_source = observation_data.get('query_source', 'current_papers')
-                if query_source == 'historical_keywords':
-                    obs_content += f"\n建议查询词来源：历史关键词重用"
-                else:
-                    obs_content += f"\n建议查询词来源：当前论文提取"
+                source_desc = {
+                    'author_focus': '作者聚焦查询',
+                    'venue_focus': '期刊聚焦查询',
+                    'historical_keywords': '历史关键词重用',
+                    'current_papers': '当前论文提取'
+                }.get(query_source, '当前论文提取')
+                obs_content += f"\n建议查询词来源：{source_desc}"
                 
-                # 显示翻页信息
+                # 显示分页信息
                 if observation_data.get('need_pagination', False):
-                    next_page = observation_data.get('next_page', current_page + 1)
-                    page_size = observation_data.get('page_size', current_page_size)
+                    new_offset = observation_data.get('new_offset', current_offset + current_limit)
+                    limit = observation_data.get('limit', current_limit)
                     pagination_reason = observation_data.get('pagination_reason', '需要更多论文')
-                    obs_content += f"\n翻页建议：第{next_page}页 (每页{page_size}篇) - {pagination_reason}"
+                    obs_content += f"\n分页建议：偏移量{new_offset} (限制{limit}篇) - {pagination_reason}"
                 
                 for chunk in self._emit_processing(obs_content, "observation"):
                     yield ("processing", f'data: {json.dumps(chunk)}\n\n')
@@ -878,21 +883,23 @@ class Pipeline:
 
 **重要要求：**
 1. **充分利用所有收集到的论文信息** - 不要遗漏任何相关研究
-2. **详细引用论文** - 每个观点都要标注来源论文的标题、作者
+2. **详细引用论文** - 每个观点都要标注来源论文的标题、作者、年份
 3. **整合多篇研究** - 综合分析不同研究的发现，指出共识和分歧
-4. **提供具体数据** - 引用论文中的具体研究数据、结果、结论
+4. **提供具体数据** - 引用论文中的具体研究数据、结果、结论、引用数
 5. **结构化回答** - 按逻辑顺序组织内容，便于理解
 6. **完整性** - 确保回答涵盖用户问题的各个方面
+7. **学术权威性** - 优先引用高引用数的重要论文
 
-请基于以上所有论文信息提供全面、详细、准确的回答。包含相关论文的完整引用信息（标题、作者、年份等）。
-如果有DOI或链接，请使用markdown格式输出可点击链接。"""
+请基于以上所有论文信息提供全面、详细、准确的回答。包含相关论文的完整引用信息（标题、作者、年份、期刊、引用数等）。
+如果有DOI或URL，请使用markdown格式输出可点击链接。"""
 
         system_prompt = """你是专业的学术论文分析专家。你的任务是：
 1. 仔细分析所有提供的论文信息
 2. 充分利用每一篇相关论文的内容
 3. 提供全面、详细、有深度的学术回答
 4. 确保每个观点都有论文支撑和引用
-5. 整合多个研究来源，提供综合性见解"""
+5. 整合多个研究来源，提供综合性见解
+6. 优先引用高影响力（高引用数）的论文"""
 
         if stream_mode:
             for chunk in self._stream_openai_response(final_prompt, system_prompt):
@@ -967,6 +974,8 @@ class Pipeline:
                 summary += f"年份: {paper.get('year')}\n"
             if paper.get('venue'):
                 summary += f"期刊/会议: {paper.get('venue')}\n"
+            if paper.get('citation_count'):
+                summary += f"引用数: {paper.get('citation_count')}\n"
             summary += f"相关性权重: {paper.get('relevance_weight', 1.0)}\n"
             if paper.get('key_findings'):
                 summary += f"关键发现: {paper.get('key_findings')}\n"
@@ -989,9 +998,9 @@ class Pipeline:
             "query_terms_used": set(),  # 已使用的查询词集合
             "extracted_keywords_history": set(),  # 历史提取的关键词集合
             "current_iteration": 0,
-            "current_page": 1,  # 当前页码
-            "current_page_size": 10,  # 当前页大小
-            "query_pages": {}  # 记录每个查询词使用的页码 {query: page}
+            "current_offset": 0,  # 当前偏移量
+            "current_limit": 10,  # 当前每页数量
+            "query_offsets": {}  # 记录每个查询词使用的偏移量 {query: offset}
         }
         
         # 重置token统计
@@ -1007,7 +1016,7 @@ class Pipeline:
             async for tools_output in self._ensure_tools_loaded(stream_mode):
                 yield tools_output
         except Exception as e:
-            error_msg = f"❌ Paperlist MCP工具加载失败: {str(e)}"
+            error_msg = f"❌ Semantic Scholar MCP工具加载失败: {str(e)}"
             if stream_mode:
                 for chunk in self._emit_processing(error_msg, "mcp_discovery"):
                     yield f'data: {json.dumps(chunk)}\n\n'
@@ -1039,12 +1048,12 @@ class Pipeline:
         while self.react_state['current_iteration'] < max_iterations and current_query:
             self.react_state['current_iteration'] += 1
             
-            # Action阶段 - 获取当前查询的页码信息
-            current_page = self.react_state.get("current_page", 1)
-            current_page_size = self.react_state.get("current_page_size", 10)
+            # Action阶段 - 获取当前查询的偏移量信息
+            current_offset = self.react_state.get("current_offset", 0)
+            current_limit = self.react_state.get("current_limit", 10)
             
             action_result = None
-            async for phase_result in self._action_phase(current_query, current_page, current_page_size, stream_mode):
+            async for phase_result in self._action_phase(current_query, current_limit, current_offset, stream_mode):
                 result_type, content = phase_result
                 if result_type == "processing":
                     yield content
@@ -1066,15 +1075,15 @@ class Pipeline:
                     observation = content
                     break
             
-            # 检查是否需要翻页（优先级高于新查询）
+            # 检查是否需要分页（优先级高于新查询）
             if observation and observation.get("need_pagination", False):
-                # 翻页：使用相同查询词，更新页码
-                next_page = observation.get("next_page", current_page + 1)
-                new_page_size = observation.get("page_size", current_page_size)
+                # 分页：使用相同查询词，更新偏移量
+                new_offset = observation.get("new_offset", current_offset + current_limit)
+                new_limit = observation.get("limit", current_limit)
                 
-                # 更新页码状态
-                self.react_state["current_page"] = next_page
-                self.react_state["current_page_size"] = new_page_size
+                # 更新偏移量状态
+                self.react_state["current_offset"] = new_offset
+                self.react_state["current_limit"] = new_limit
                 
                 # 继续使用相同查询词进行下一轮搜索
                 # current_query 保持不变
@@ -1084,9 +1093,9 @@ class Pipeline:
             if not observation or not observation.get("need_more_search", False) or observation.get("sufficient_info", False):
                 break
             
-            # 获取下一轮查询词（重置页码为1）
+            # 获取下一轮查询词（重置偏移量为0）
             current_query = observation.get("suggested_query", "")
-            self.react_state["current_page"] = 1  # 新查询词从第1页开始
+            self.react_state["current_offset"] = 0  # 新查询词从偏移量0开始
             
             # 如果建议的查询词已经使用过，则停止
             if current_query and current_query.lower() in self.react_state['query_terms_used']:

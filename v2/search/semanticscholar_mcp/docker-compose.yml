@@ -1,7 +1,7 @@
 version: '3.8'
 
 services:
-  pubtator3-fastmcp:
+  semanticscholar-fastmcp:
     build:
       context: .
       dockerfile: Dockerfile
@@ -12,10 +12,10 @@ services:
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
         PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-pypi.tuna.tsinghua.edu.cn}
     ports:
-      - "8991:8991"
+      - "8992:8992"
     environment:
       - PYTHONPATH=/app
-      - PORT=8991
+      - PORT=8992
       - PYTHONUNBUFFERED=1
       # Mirror configuration for runtime (if needed)
       - APT_MIRROR=${APT_MIRROR:-http://mirrors.aliyun.com}
@@ -27,15 +27,14 @@ services:
     stdin_open: true
     tty: true
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8991/api/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8992/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
     networks:
-      - pubtator3-network
+      - semanticscholar-network
 
 networks:
-  pubtator3-network:
+  semanticscholar-network:
     driver: bridge
-
