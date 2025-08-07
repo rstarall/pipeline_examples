@@ -24,8 +24,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Semantic Scholar API configuration
-SEMANTIC_SCHOLAR_API_KEY = "8Bbu1DtnaZ6BydBaYeiPj8ye5KSMynoU1lk2zyLn"
-SEMANTIC_SCHOLAR_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
+SEMANTIC_SCHOLAR_API_KEY = "sk-user-D499F926CD23FACD63C62D59E4038CCC"
+SEMANTIC_SCHOLAR_PROXY_URL = "https://lifuai.com/api/v1/graph/v1/paper/search"
 
 # Data models
 class AuthorInfo(BaseModel):
@@ -99,7 +99,7 @@ async def get_http_client():
             'User-Agent': 'SemanticScholar-MCP-Bot/1.0 (research@example.com)',
             'Accept': 'application/json',
             'Connection': 'keep-alive',
-            'X-API-KEY': SEMANTIC_SCHOLAR_API_KEY,
+            'Authorization': f'Bearer {SEMANTIC_SCHOLAR_API_KEY}',
             'Content-Type': 'application/json'
         }
         
@@ -147,7 +147,7 @@ class SemanticScholarAPI:
             logger.info(f"Searching papers with query: '{query}', limit: {limit}, offset: {offset}")
             
             async with self.session.get(
-                SEMANTIC_SCHOLAR_URL,
+                SEMANTIC_SCHOLAR_PROXY_URL,
                 params=params
             ) as response:
                 response.raise_for_status()
