@@ -44,41 +44,37 @@ STAGE_GROUP = {
 # 提示词模板定义
 # ===========================================
 
-REASONING_PROMPT = """你是专业的知识检索助手。请基于用户问题和历史对话分析是否需要使用LightRAG进行知识检索。
+REASONING_PROMPT = """你是专业的知识检索助手。请首先深入分析用户意图，然后判断是否需要使用LightRAG进行知识检索。
 
 用户当前问题: {user_message}
 历史对话上下文: {conversation_context}
 已使用的查询词: {used_queries}
 已收集的信息摘要: {collected_info_summary}
 
-请分析：
-1. 用户问题的核心意图和需求
-2. 历史对话中是否已有相关信息
-3. 是否需要通过LightRAG获取更多知识
-4. 如果需要检索，生成适合的查询问题
 
- **LightRAG检索特点及模式：**
- - naive: 朴素向量搜索，速度快，适合简单文档检索
- - local: 本地模式，专注特定实体的详细信息和上下文
- - global: 全局模式，侧重实体间关系和全局知识结构
- - hybrid: 混合模式，结合local和global优势
- - mix: 混合检索模式，整合知识图谱和向量检索，最全面效果最好（默认推荐）
- - 支持中英文混合查询，适用于复杂知识图谱推理
- 
- 回复格式：
- ```json
- {{
-     "need_search": true/false,
-     "search_query": "适合LightRAG检索的查询问题",
-     "reasoning": "分析思路和判断依据",
-     "search_mode": "naive/local/global/hybrid/mix",
-     "sufficient_info": true/false
- }}
+**LightRAG检索模式选择指南：**
+- naive: 快速文档检索，适合简单概念查找
+- local: 深挖特定实体，适合需要详细信息的意图  
+- global: 关系推理，适合需要理解关联性的意图
+- hybrid: 平衡模式，适合中等复杂度问题
+- mix: 最全面检索，适合复杂分析和深度理解需求（优先推荐）
+
+回复格式：
+```json
+{{
+    "intent_analysis": "详细分析用户的目的、期望回答类型和深度要求",
+    "need_search": true/false,
+    "search_query": "基于用户意图和当前问题优化的检索查询",
+    "reasoning": "基于用户意图和当前问题分析的检索策略和判断依据",
+    "search_mode": "针对用户意图和当前问题选择的最佳检索模式",
+    "sufficient_info": true/false
+}}
 ```"""
 
-OBSERVATION_PROMPT = """你是专业的信息分析专家。请分析LightRAG检索结果，判断信息是否充分，是否需要进一步检索。
+OBSERVATION_PROMPT = """你是专业的信息分析专家。请基于用户意图分析当前检索结果，判断是否满足用户的真实需求，并制定基于意图的优化检索策略。
 
 用户原始问题: {user_message}
+用户意图分析: {intent_analysis}
 当前检索查询: {current_query}
 检索模式: {search_mode}
 检索结果: {search_result}
@@ -86,51 +82,42 @@ OBSERVATION_PROMPT = """你是专业的信息分析专家。请分析LightRAG检
 已收集的历史信息:
 {collected_info}
 
-请分析：
-1. 当前检索结果的质量和相关性
-2. 是否已获得足够信息回答用户问题
-3. 如果信息不足，需要什么样的补充查询
-4. 提取当前结果中的关键信息点
+**核心分析任务：**
+1. **信息完整性判断**：基于用户期望的回答深度，评估信息是否充分
+2. **深度分析判断优化**：基于获取到的信息，进行下一轮检索深度分析优化
 
- **查询优化建议（选择合适的检索模式）：**
- - naive: 简单快速检索，适合基础文档查找
- - local: 深入实体细节，适合查询特定概念/人物信息  
- - global: 关系推理，适合需要理解实体间关系的问题
- - hybrid: 平衡模式，适合一般复杂问题
- - mix: 最全面检索，效果最好，优先推荐（默认选择）
- - 可优化查询关键词、从不同角度构造问题、基于已有结果扩展查询
- 
- 回复格式：
- ```json
- {{
-     "relevance_score": 1-10,
-     "sufficient_info": true/false,
-     "need_more_search": true/false,
-     "next_query": "下一轮检索查询(if needed)",
-     "next_mode": "naive/local/global/hybrid/mix",
-     "optimization_reason": "查询优化理由",
-     "key_information": ["从当前结果提取的关键信息点"],
-     "observation": "详细的结果分析和思考"
- }}
+**LightRAG检索模式选择指南：**
+- naive: 快速文档检索，适合简单概念查找
+- local: 深挖特定实体，适合需要详细信息的意图  
+- global: 关系推理，适合需要理解关联性的意图
+- hybrid: 平衡模式，适合中等复杂度问题
+- mix: 最全面检索，适合复杂分析和深度理解需求（优先推荐）
+
+回复格式：
+```json
+{{
+    "relevance_score": 1-10,
+    "intent_match_score": 1-10,
+    "sufficient_info": true/false,
+    "need_more_search": true/false,
+    "next_query": "基于已有信息优化的下一轮检索查询",
+    "next_mode": "基于已有信息选择的最佳检索模式",
+    "optimization_reason": "基于已有信息的查询优化策略和理由",
+    "key_information": ["提取的关键信息点"],
+    "observation": "基于用户意图的结果分析和下一步策略"
+}}
 ```"""
 
-ANSWER_GENERATION_PROMPT = """基于收集到的LightRAG检索结果，为用户提供全面准确的答案。
+ANSWER_GENERATION_PROMPT = """请基于用户问题、对话历史、已有的信息，提供针对性的回答。
 
 用户问题: {user_message}
 历史对话: {conversation_context}
 
-收集到的信息:
+检索到的相关信息:
 {collected_information}
 
-**回答要求：**
-1. 充分利用所有检索到的信息
-2. 确保答案准确、详细、有逻辑
-3. 如果信息中有矛盾，需要指出并分析
-4. 如果信息不完整，诚实说明局限性
-5. 结构化组织回答内容
-6. 突出关键信息和洞察
 
-请基于以上信息提供全面的回答。"""
+基于你的知识和检索到的信息进行深度分析、思考，然后提供专业、全面、详细的回答"""
 
 class Pipeline:
     class Valves(BaseModel):
@@ -589,7 +576,7 @@ class Pipeline:
         yield ("result", search_result)
 
     async def _observation_phase(self, search_result: dict, current_query: str, search_mode: str, 
-                         user_message: str, stream_mode: bool) -> AsyncGenerator[tuple, None]:
+                         user_message: str, intent_analysis: str, stream_mode: bool) -> AsyncGenerator[tuple, None]:
         """ReAct观察阶段"""
         if stream_mode:
             for chunk in self._emit_processing("观察检索结果，分析信息质量，决定下一步行动...", "observation"):
@@ -609,6 +596,7 @@ class Pipeline:
         
         observation_prompt = OBSERVATION_PROMPT.format(
             user_message=user_message,
+            intent_analysis=intent_analysis,
             current_query=current_query,
             search_mode=search_mode,
             search_result=json.dumps(search_result, ensure_ascii=False, indent=2),
@@ -805,6 +793,7 @@ class Pipeline:
         max_iterations = self.valves.MAX_REACT_ITERATIONS
         current_query = initial_decision.get("search_query", "")
         search_mode = initial_decision.get("search_mode", self.valves.LIGHTRAG_DEFAULT_MODE)
+        intent_analysis = initial_decision.get("intent_analysis", "")
         
         while self.react_state['current_iteration'] < max_iterations and current_query:
             self.react_state['current_iteration'] += 1
@@ -824,7 +813,7 @@ class Pipeline:
             
             # Observation阶段
             observation = None
-            async for phase_result in self._observation_phase(search_result, current_query, search_mode, user_message, stream_mode):
+            async for phase_result in self._observation_phase(search_result, current_query, search_mode, user_message, intent_analysis, stream_mode):
                 result_type, content = phase_result
                 if result_type == "processing":
                     yield content

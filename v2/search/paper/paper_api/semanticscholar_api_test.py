@@ -9,7 +9,7 @@ result_limit = 10
 
 
 def main():
-    find_basis_paper(query="generative AI")
+    find_basis_paper(query="venue:Nature artificial intelligenc")
 
 
 def find_basis_paper(query):

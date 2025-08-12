@@ -32,7 +32,7 @@ def search_papers(query, limit=10,offset=0):
 
 # 使用示例
 api_key = "sk-user-D499F926CD23FACD63C62D59E4038CCC"
-search_papers("generative AI", limit=15)
+search_papers("venue:Nature artificial intelligenc", limit=15)
 
 """
 返回

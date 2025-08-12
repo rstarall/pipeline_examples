@@ -1,9 +1,12 @@
 """
-参考v2\search\pubchempy_mcp\src\llm_use.py编写本pipeline
-1.采用流式输出,允许中间工具调用(流式回答等待不要返回Done),调用完继续流式回答，直到结束返回Done
-2.工具调用时使用_emit_processing输出调用和返回结果
-3.注意你的提示词是一个化合物化学公式问答助手，根据搜索返回的json进行知识问答
-4.参考v2\search\serper_openai_pipeline.py，不需要搜索，可多次调用工具
+PubChemPy MCP Pipeline - 基于MCP协议的化学信息查询管道
+
+功能特性:
+1. 通过MCP JSON-RPC协议动态发现服务器工具
+2. 使用MCP JSON-RPC协议进行工具调用
+3. 支持流式输出和智能工具选择
+4. AI决策驱动的单次工具调用模式
+5. 工具调用解析错误时自动重试机制
 """
 
 import os
@@ -12,7 +15,7 @@ import requests
 import asyncio
 import aiohttp
 import time
-from typing import List, Union, Generator, Iterator, Dict, Any, Optional
+from typing import List, Union, Generator, Iterator, Dict, Any, Optional, AsyncGenerator
 from pydantic import BaseModel
 import logging
 
@@ -22,13 +25,13 @@ logger = logging.getLogger(__name__)
 
 # 后端阶段标题映射
 STAGE_TITLES = {
-    "chemical_analysis": "化学分析",
+    "mcp_discovery": "MCP服务发现", 
     "tool_calling": "工具调用",
     "answer_generation": "生成回答",
 }
 
 STAGE_GROUP = {
-    "chemical_analysis": "stage_group_1",
+    "mcp_discovery": "stage_group_1",
     "tool_calling": "stage_group_2", 
     "answer_generation": "stage_group_3",
 }
@@ -49,18 +52,27 @@ class Pipeline:
         MAX_TOOL_CALLS: int
         
         # MCP配置
-        MCP_REMOTE_URL: str
+        MCP_SERVER_URL: str
         MCP_TIMEOUT: int
+        MCP_TOOLS_EXPIRE_HOURS: int
 
     def __init__(self):
         self.name = "PubChemPy MCP Chemical Pipeline"
         
         # 初始化token统计
         self.token_stats = {
-            "input_tokens": 0,
+            "input_tokens": 0, 
             "output_tokens": 0,
             "total_tokens": 0
         }
+        
+        # MCP工具缓存
+        self.mcp_tools = {}
+        self.tools_loaded = False
+        self.tools_loaded_time = None  # 记录工具加载时间
+        
+        # MCP会话ID将在初始化时从服务器获取
+        self.session_id = None
         
         self.valves = self.Valves(
             **{
@@ -75,131 +87,383 @@ class Pipeline:
                 # Pipeline配置
                 "ENABLE_STREAMING": os.getenv("ENABLE_STREAMING", "true").lower() == "true",
                 "DEBUG_MODE": os.getenv("DEBUG_MODE", "false").lower() == "true",
-                "MAX_TOOL_CALLS": int(os.getenv("MAX_TOOL_CALLS", "5")),
+                "MAX_TOOL_CALLS": int(os.getenv("MAX_TOOL_CALLS", "3")),
                 
                 # MCP配置
-                "MCP_REMOTE_URL": os.getenv("MCP_REMOTE_URL", "http://localhost:8989"),
+                "MCP_SERVER_URL": os.getenv("MCP_SERVER_URL", "http://localhost:8989"),
                 "MCP_TIMEOUT": int(os.getenv("MCP_TIMEOUT", "30")),
+                "MCP_TOOLS_EXPIRE_HOURS": int(os.getenv("MCP_TOOLS_EXPIRE_HOURS", "12")),
             }
         )
 
     async def on_startup(self):
-        print(f"PubChemPy MCP Chemical Pipeline启动: {__name__}")
+        print(f"PubChemPy MCP Chemical Pipeline V2启动: {__name__}")
         
         # 验证必需的API密钥
         if not self.valves.OPENAI_API_KEY:
             print("❌ 缺少OpenAI API密钥，请设置OPENAI_API_KEY环境变量")
         
         # 验证MCP服务器地址
-        print(f"🔗 MCP服务器地址: {self.valves.MCP_REMOTE_URL}")
-        if not self.valves.MCP_REMOTE_URL:
-            print("❌ 缺少MCP服务器地址，请设置MCP_REMOTE_URL环境变量")
+        print(f"🔗 MCP服务器地址: {self.valves.MCP_SERVER_URL}")
+        print(f"⏰ 工具过期时间: {self.valves.MCP_TOOLS_EXPIRE_HOURS} 小时")
+        if not self.valves.MCP_SERVER_URL:
+            print("❌ 缺少MCP服务器地址，请设置MCP_SERVER_URL环境变量")
+        
+        print("🔧 MCP工具将在首次使用时自动发现")
 
     async def on_shutdown(self):
-        print(f"PubChemPy MCP Chemical Pipeline关闭: {__name__}")
+        print(f"PubChemPy MCP Chemical Pipeline V2关闭: {__name__}")
         print("🔚 Pipeline已关闭")
 
-
-
-    async def _call_mcp_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """通过HTTP调用远程化学搜索工具"""
-        if not self.valves.MCP_REMOTE_URL:
-            return {"error": "MCP服务器地址未配置"}
+    async def _initialize_mcp_session(self, stream_mode: bool = False) -> AsyncGenerator[str, None]:
+        """初始化MCP会话并获取服务器分配的session ID"""
+        if not self.valves.MCP_SERVER_URL:
+            raise Exception("MCP服务器地址未配置")
         
         try:
-            # 构建直接HTTP API请求（而不是MCP JSON-RPC）
-            if tool_name == "search_chemical":
-                # 直接调用/search端点
-                search_url = f"{self.valves.MCP_REMOTE_URL.rstrip('/')}/search"
-                payload = {
-                    "query": arguments.get("query", ""),
-                    "search_type": arguments.get("search_type", "formula"),
-                    "use_fallback": arguments.get("use_fallback", False)
-                }
-                
-                headers = {
-                    "Content-Type": "application/json",
-                    "Accept": "application/json"
-                }
-                
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        search_url,
-                        headers=headers,
-                        json=payload,
-                        timeout=aiohttp.ClientTimeout(total=self.valves.MCP_TIMEOUT)
-                    ) as response:
-                        if response.status == 200:
-                            result = await response.json()
-                            
-                            # 将简化格式转换为MCP格式，保持兼容性
-                            if result.get("success"):
-                                # 构建MCP格式的content
-                                content_text = f"🧪 化学搜索结果\n"
-                                content_text += f"查询: {result.get('query', '')}\n"
-                                content_text += f"搜索类型: {result.get('search_type', '')}\n"
-                                content_text += f"数据源: {result.get('source', '')}\n"
-                                content_text += f"找到 {len(result.get('results', []))} 个化合物\n\n"
-                                
-                                for i, compound in enumerate(result.get('results', []), 1):
-                                    content_text += f"--- 化合物 {i} ---\n"
-                                    if compound.get('cid'):
-                                        content_text += f"PubChem CID: {compound['cid']}\n"
-                                    if compound.get('iupac_name'):
-                                        content_text += f"IUPAC名称: {compound['iupac_name']}\n"
-                                    if compound.get('molecular_formula'):
-                                        content_text += f"分子式: {compound['molecular_formula']}\n"
-                                    if compound.get('molecular_weight'):
-                                        content_text += f"分子量: {compound['molecular_weight']:.2f} g/mol\n"
-                                    if compound.get('smiles'):
-                                        content_text += f"SMILES: {compound['smiles']}\n"
-                                    if compound.get('inchi_key'):
-                                        content_text += f"InChI Key: {compound['inchi_key']}\n"
-                                    
-                                    if compound.get('synonyms'):
-                                        synonyms_text = ", ".join(compound['synonyms'][:5])
-                                        if len(compound['synonyms']) > 5:
-                                            synonyms_text += f" (还有{len(compound['synonyms']) - 5}个)"
-                                        content_text += f"同义名: {synonyms_text}\n"
-                                    
-                                    if compound.get('properties'):
-                                        content_text += "性质:\n"
-                                        for key, value in compound['properties'].items():
-                                            if value is not None:
-                                                key_formatted = key.replace('_', ' ').title()
-                                                content_text += f"  {key_formatted}: {value}\n"
-                                    
-                                    content_text += "\n"
-                                
-                                return {
-                                    "content": [
-                                        {"type": "text", "text": content_text}
-                                    ]
-                                }
-                            else:
-                                return {"error": result.get("error", "搜索失败")}
+            mcp_url = f"{self.valves.MCP_SERVER_URL.strip().rstrip('/')}/mcp"
+            
+            # Step 1: 发送initialize请求（不带session ID）
+            initialize_request = {
+                "jsonrpc": "2.0",
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {
+                        "sampling": {},
+                        "roots": {"listChanged": True}
+                    },
+                    "clientInfo": {
+                        "name": "PubChemPy MCP Pipeline",
+                        "version": "2.0.0"
+                    }
+                },
+                "id": "init-1"
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    mcp_url,
+                    json=initialize_request,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Accept": "application/json, text/event-stream"
+                    },
+                    timeout=aiohttp.ClientTimeout(total=self.valves.MCP_TIMEOUT)
+                ) as response:
+                    if response.status == 200:
+                        # 检查响应头中的session ID
+                        server_session_id = response.headers.get("Mcp-Session-Id")
+                        if server_session_id:
+                            self.session_id = server_session_id
+                        
+                        # 处理响应，可能是JSON或SSE流
+                        content_type = response.headers.get("Content-Type", "")
+                        
+                        if "text/event-stream" in content_type:
+                            # 处理SSE流
+                            init_response = None
+                            async for line in response.content:
+                                line_str = line.decode('utf-8').strip()
+                                if line_str.startswith('data: '):
+                                    try:
+                                        data = json.loads(line_str[6:])  # 移除 'data: ' 前缀
+                                        if data.get("id") == "init-1":  # 匹配我们的请求ID
+                                            init_response = data
+                                            break
+                                    except json.JSONDecodeError:
+                                        continue
                         else:
-                            return {"error": f"HTTP {response.status}: {await response.text()}"}
+                            # 直接JSON响应
+                            init_response = await response.json()
+                        
+                        if not init_response:
+                            raise Exception("No initialize response received")
+                        
+                        if "error" in init_response:
+                            raise Exception(f"MCP initialize error: {init_response['error']}")
+                        
+                        # Step 2: 发送initialized通知
+                        initialized_notification = {
+                            "jsonrpc": "2.0",
+                            "method": "notifications/initialized"
+                        }
+                        
+                        headers = {
+                            "Content-Type": "application/json",
+                            "Accept": "application/json, text/event-stream"
+                        }
+                        if hasattr(self, 'session_id') and self.session_id:
+                            headers["Mcp-Session-Id"] = self.session_id
+                        
+                        async with session.post(
+                            mcp_url,
+                            json=initialized_notification,
+                            headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=self.valves.MCP_TIMEOUT)
+                        ) as notify_response:
+                            if notify_response.status not in [200, 202]:
+                                pass  # 忽略initialized通知失败
+                        
+                        init_msg = "🔧 MCP会话初始化完成"
+                        if stream_mode:
+                            for chunk in self._emit_processing(init_msg, "mcp_discovery"):
+                                yield f'data: {json.dumps(chunk)}\n\n'
+                        else:
+                            yield init_msg + "\n"
+                    else:
+                        error_text = await response.text()
+                        raise Exception(f"Initialize failed - HTTP {response.status}: {error_text}")
+                        
+        except Exception as e:
+            error_msg = f"❌ MCP会话初始化失败: {e}"
+            if stream_mode:
+                for chunk in self._emit_processing(error_msg, "mcp_discovery"):
+                    yield f'data: {json.dumps(chunk)}\n\n'
             else:
-                return {"error": f"不支持的工具: {tool_name}"}
-                
+                yield error_msg + "\n"
+            raise
+
+    async def _discover_mcp_tools(self, stream_mode: bool = False) -> AsyncGenerator[str, None]:
+        """通过MCP JSON-RPC协议发现服务器工具"""
+        if not self.valves.MCP_SERVER_URL:
+            raise Exception("MCP服务器地址未配置")
+        
+        start_msg = f"🔍 正在发现MCP工具..."
+        if stream_mode:
+            for chunk in self._emit_processing(start_msg, "mcp_discovery"):
+                yield f'data: {json.dumps(chunk)}\n\n'
+        else:
+            yield start_msg + "\n"
+        
+        # 首先初始化MCP会话
+        if not hasattr(self, '_session_initialized'):
+            async for init_output in self._initialize_mcp_session(stream_mode):
+                yield init_output
+            self._session_initialized = True
+        
+        try:
+            # 构建MCP JSON-RPC请求
+            mcp_request = {
+                "jsonrpc": "2.0",
+                "method": "tools/list",
+                "id": "tools-list-1"
+            }
+            
+            mcp_url = f"{self.valves.MCP_SERVER_URL.strip().rstrip('/')}/mcp"
+            
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream"
+            }
+            if hasattr(self, 'session_id') and self.session_id:
+                headers["Mcp-Session-Id"] = self.session_id
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    mcp_url,
+                    json=mcp_request,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=self.valves.MCP_TIMEOUT)
+                ) as response:
+                    if response.status == 200:
+                        # 处理响应，可能是JSON或SSE流
+                        content_type = response.headers.get("Content-Type", "")
+                        
+                        if "text/event-stream" in content_type:
+                            # 处理SSE流
+                            mcp_response = None
+                            async for line in response.content:
+                                line_str = line.decode('utf-8').strip()
+                                if line_str.startswith('data: '):
+                                    try:
+                                        data = json.loads(line_str[6:])  # 移除 'data: ' 前缀
+                                        if data.get("id") == "tools-list-1":  # 匹配我们的请求ID
+                                            mcp_response = data
+                                            break
+                                    except json.JSONDecodeError:
+                                        continue
+                        else:
+                            # 直接JSON响应
+                            mcp_response = await response.json()
+                        
+                        if not mcp_response:
+                            raise Exception("No tools/list response received")
+                        
+                        if "error" in mcp_response:
+                            raise Exception(f"MCP error: {mcp_response['error']}")
+                        
+                        tools = mcp_response.get("result", {}).get("tools", [])
+                        
+                        # 加载所有工具（不再通过tags过滤）
+                        for tool in tools:
+                            tool_name = tool.get("name")
+                            if tool_name:
+                                self.mcp_tools[tool_name] = {
+                                    "name": tool_name,
+                                    "description": tool.get("description", ""),
+                                    "input_schema": tool.get("inputSchema", {})
+                                }
+                        
+                        self.tools_loaded = True
+                        self.tools_loaded_time = time.time()  # 记录工具加载时间
+                        
+                        final_msg = f"✅ 发现 {len(self.mcp_tools)} 个MCP工具"
+                        if len(self.mcp_tools) > 0:
+                            final_msg += f": {', '.join(self.mcp_tools.keys())}"
+                        
+                        if stream_mode:
+                            for chunk in self._emit_processing(final_msg, "mcp_discovery"):
+                                yield f'data: {json.dumps(chunk)}\n\n'
+                        else:
+                            yield final_msg + "\n"
+                        
+                    else:
+                        error_text = await response.text()
+                        raise Exception(f"HTTP {response.status}: {error_text}")
+                        
+        except Exception as e:
+            error_msg = f"❌ MCP工具发现失败: {e}"
+            if stream_mode:
+                for chunk in self._emit_processing(error_msg, "mcp_discovery"):
+                    yield f'data: {json.dumps(chunk)}\n\n'
+            else:
+                yield error_msg + "\n"
+            raise
+
+    def _are_tools_expired(self) -> bool:
+        """检查MCP工具是否已过期"""
+        if not self.tools_loaded or self.tools_loaded_time is None:
+            return True
+        
+        current_time = time.time()
+        expire_seconds = self.valves.MCP_TOOLS_EXPIRE_HOURS * 3600  # 转换为秒
+        return (current_time - self.tools_loaded_time) > expire_seconds
+
+    async def _ensure_tools_loaded(self, stream_mode: bool = False) -> AsyncGenerator[str, None]:
+        """确保MCP工具已加载且未过期"""
+        need_reload = False
+        reason = ""
+        
+        if not self.tools_loaded:
+            need_reload = True
+            reason = "工具未加载"
+        elif self._are_tools_expired():
+            need_reload = True
+            expired_hours = (time.time() - self.tools_loaded_time) / 3600
+            reason = f"工具已过期 ({expired_hours:.1f} 小时前加载)"
+        
+        if need_reload:
+            reload_msg = f"🔄 {reason}，正在重新发现MCP工具..."
+            if stream_mode:
+                for chunk in self._emit_processing(reload_msg, "mcp_discovery"):
+                    yield f'data: {json.dumps(chunk)}\n\n'
+            else:
+                yield reload_msg + "\n"
+            
+            # 清除旧的工具和会话状态
+            self.mcp_tools = {}
+            self.tools_loaded = False
+            self.tools_loaded_time = None
+            if hasattr(self, '_session_initialized'):
+                delattr(self, '_session_initialized')
+            self.session_id = None
+            
+            async for discovery_output in self._discover_mcp_tools(stream_mode):
+                yield discovery_output
+
+    async def _call_mcp_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """使用MCP JSON-RPC协议调用工具"""
+        if not self.valves.MCP_SERVER_URL:
+            return {"error": "MCP服务器地址未配置"}
+        
+        if not self.tools_loaded or self._are_tools_expired():
+            try:
+                async for output in self._ensure_tools_loaded(stream_mode=False):
+                    # Silently consume the debug output in this context
+                    pass
+            except Exception as e:
+                return {"error": f"工具加载失败: {str(e)}"}
+        
+        if tool_name not in self.mcp_tools:
+            return {"error": f"工具 '{tool_name}' 不可用"}
+        
+        try:
+            # 构建MCP JSON-RPC请求
+            mcp_url = f"{self.valves.MCP_SERVER_URL.strip().rstrip('/')}/mcp"
+            
+            # MCP JSON-RPC格式请求体
+            jsonrpc_payload = {
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": {
+                    "name": tool_name,
+                    "arguments": arguments
+                },
+                "id": f"mcp_{tool_name}_{int(time.time())}"
+            }
+            
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream"
+            }
+            if hasattr(self, 'session_id') and self.session_id:
+                headers["Mcp-Session-Id"] = self.session_id
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    mcp_url,
+                    headers=headers,
+                    json=jsonrpc_payload,
+                    timeout=aiohttp.ClientTimeout(total=self.valves.MCP_TIMEOUT)
+                ) as response:
+                    if response.status == 200:
+                        # 处理响应，可能是JSON或SSE流
+                        content_type = response.headers.get("Content-Type", "")
+                        if "text/event-stream" in content_type:
+                            # 处理SSE流
+                            result = None
+                            request_id = jsonrpc_payload["id"]
+                            async for line in response.content:
+                                line_str = line.decode('utf-8').strip()
+                                if line_str.startswith('data: '):
+                                    try:
+                                        data = json.loads(line_str[6:])  # 移除 'data: ' 前缀
+                                        if data.get("id") == request_id:  # 匹配我们的请求ID
+                                            result = data
+                                            break
+                                    except json.JSONDecodeError:
+                                        continue
+                        else:
+                            # 直接JSON响应
+                            result = await response.json()
+                        
+                        if not result:
+                            return {"error": "No response received"}
+                        
+                        # 处理MCP JSON-RPC响应
+                        if "result" in result:
+                            return result["result"]
+                        elif "error" in result:
+                            return {"error": f"MCP错误: {result['error'].get('message', 'Unknown error')}"}
+                        else:
+                            return {"error": "无效的MCP响应格式"}
+                    else:
+                        return {"error": f"HTTP {response.status}: {await response.text()}"}
+                        
         except asyncio.TimeoutError:
-            logger.error("化学搜索工具调用超时")
+            logger.error(f"MCP工具调用超时: {tool_name}")
             return {"error": "请求超时"}
         except aiohttp.ClientError as e:
-            logger.error(f"化学搜索HTTP请求失败: {e}")
+            logger.error(f"MCP HTTP请求失败: {e}")
             return {"error": f"HTTP请求失败: {str(e)}"}
         except Exception as e:
-            logger.error(f"化学搜索工具调用失败: {e}")
+            logger.error(f"MCP工具调用失败: {e}")
             return {"error": str(e)}
 
-    async def _search_chemical(self, query: str, search_type: str = "formula", use_fallback: bool = False) -> str:
-        """搜索化学物质"""
-        result = await self._call_mcp_tool("search_chemical", {
-            "query": query,
-            "search_type": search_type,
-            "use_fallback": use_fallback
-        })
+    async def _execute_mcp_tool(self, tool_name: str, arguments: Dict[str, Any]) -> str:
+        """执行MCP工具并返回格式化结果"""
+        result = await self._call_mcp_tool(tool_name, arguments)
         
         if "content" in result and result["content"]:
             # 提取文本内容
@@ -209,9 +473,9 @@ class Pipeline:
                     text_content += content.get("text", "") + "\n"
             return text_content.strip()
         elif "error" in result:
-            return f"搜索失败: {result['error']}"
+            return f"工具执行失败: {result['error']}"
         else:
-            return "未找到相关化学信息"
+            return "工具执行未返回有效结果"
 
     def _estimate_tokens(self, text: str) -> int:
         """简单的token估算函数"""
@@ -377,58 +641,76 @@ class Pipeline:
         }
 
     def _get_system_prompt(self) -> str:
-        """获取系统提示词"""
-        return """你是一个专业的化学信息助手。你可以帮助用户查询化学物质的详细信息。
+        """动态生成基于可用MCP工具的系统提示词"""
+        base_prompt = """你是一个专业的化学信息助手，能够使用MCP工具来查询化学物质的详细信息。
 
-当用户询问以下内容时，你需要调用化学搜索工具：
-1. 询问特定化学物质的信息（如咖啡因、水、乙醇等）
-2. 提供分子式并询问对应的化合物（如H2O、C8H10N4O2等）
-3. 提供SMILES字符串并询问化合物信息（如CCO、CN1C=NC2=C1C(=O)N(C(=O)N2C)C等）
-4. 询问化学物质的性质、结构、同义词等
-
-⚠️ 重要：PubChem数据库主要使用英文，因此query参数必须为英文名称、分子式或SMILES字符串。
-
-🧠 智能转换规则：
-- 如果用户提供中文化学名称，请根据你的化学知识将其转换为对应的英文名称
-- 优先使用英文化学名称搜索（推荐，更准确）
-- 如果不确定中文名称对应的英文名，再考虑使用分子式搜索
-- 如果用户直接提供了分子式或SMILES，直接使用
+🔧 可用工具：
+"""
+        
+        # 动态添加工具信息
+        if self.mcp_tools:
+            for tool_name, tool_info in self.mcp_tools.items():
+                base_prompt += f"""
+工具名称: {tool_name}
+描述: {tool_info.get('description', '无描述')}
+"""
+                
+                # 添加输入参数信息
+                input_schema = tool_info.get('input_schema', {})
+                if input_schema and 'properties' in input_schema:
+                    base_prompt += "参数:\n"
+                    for param_name, param_info in input_schema['properties'].items():
+                        param_type = param_info.get('type', 'unknown')
+                        param_desc = param_info.get('description', '无描述')
+                        param_required = param_name in input_schema.get('required', [])
+                        required_str = " (必需)" if param_required else " (可选)"
+                        base_prompt += f"  - {param_name} ({param_type}){required_str}: {param_desc}\n"
+                    base_prompt += "\n"
+        else:
+            base_prompt += "⚠️ 当前没有可用的MCP工具\n"
+        
+        base_prompt += """
+🧠 使用指南：
+1. 当用户询问化学物质信息时，分析他们的需求并选择合适的工具
+2. 当信息不全或涉及专业知识时，优先调用工具获取准确详细的数据
+3. 即使对化学知识有一定了解，也建议通过工具验证和补充最新信息
+4. PubChem数据库主要使用英文，因此query参数应为英文名称、分子式或SMILES字符串
+5. 如果用户提供中文化学名称，请转换为对应的英文名称
+6. 优先使用英文化学名称搜索（更准确）
 
 转换示例：
 - "咖啡因" → "caffeine" (中文转英文名)
 - "H2O" → "H2O" (分子式保持不变)
 - "CCO" → "CCO" (SMILES保持不变)
 
-如果你判断需要搜索化学信息，请回复：
-TOOL_CALL:search_chemical:{"query": "转换后的英文/分子式/SMILES", "search_type": "搜索类型"}
+🔄 工具调用格式：
+如果需要调用工具，请回复：
+TOOL_CALL:<工具名称>:<JSON参数>
 
-其中search_type可以是：
-- "name": 按英文化学名称搜索（推荐，更准确）
-- "formula": 按分子式搜索
-- "smiles": 按SMILES字符串搜索
+示例：
+- TOOL_CALL:search_chemical:{"query": "caffeine", "search_type": "name"}
+- TOOL_CALL:search_chemical:{"query": "H2O", "search_type": "formula"}
+- TOOL_CALL:search_chemical:{"query": "CCO", "search_type": "smiles"}
 
-调用示例：
-- 用户问"咖啡因的分子式是什么" → TOOL_CALL:search_chemical:{"query": "caffeine", "search_type": "name"}
-- 用户问"H2O是什么化合物" → TOOL_CALL:search_chemical:{"query": "H2O", "search_type": "formula"}
-- 用户问"CCO代表什么" → TOOL_CALL:search_chemical:{"query": "CCO", "search_type": "smiles"}
-
-如果不需要搜索化学信息，请正常回答用户的问题。如果需要多次调用工具来获取更多信息，可以继续调用。"""
-
-    async def _process_user_message(self, user_message: str, messages: List[dict], stream_mode: bool) -> Generator:
-        """处理用户消息，支持多轮工具调用"""
+如果不需要工具调用，请直接回答用户问题。可以多次调用工具获取更完整的信息。
+"""
         
-        # 获取系统提示词
-        system_prompt = self._get_system_prompt()
-        
+        return base_prompt
+
+    def _build_conversation_context(self, user_message: str, messages: List[dict]) -> str:
+        """构建完整的对话上下文"""
         # 构建对话历史
         conversation_history = []
         if messages and len(messages) > 1:
-            # 取最近的几轮对话作为上下文
-            recent_messages = messages[-6:] if len(messages) > 6 else messages
+            # 取最近的2轮对话作为上下文（4条消息）
+            recent_messages = messages[-4:] if len(messages) > 4 else messages
             for msg in recent_messages:
                 role = msg.get("role", "")
                 content = msg.get("content", "")
                 if role in ["user", "assistant"]:
+                    # 对对话内容进行300长度截断
+                    if len(content) > 300:
+                        content = content[:300] + "..."
                     conversation_history.append({"role": role, "content": content})
         
         # 添加当前用户消息
@@ -445,98 +727,108 @@ TOOL_CALL:search_chemical:{"query": "转换后的英文/分子式/SMILES", "sear
 
 当前用户问题: {user_message}
 
-请根据上下文和当前问题，决定是否需要调用化学搜索工具。如果需要，请按照指定格式回复工具调用。
-回答要忠于上下文、当前问题、搜索到的信息。"""
+请根据上下文和当前问题，决定是否需要调用MCP工具。如果需要，请按照指定格式回复工具调用。
+回答要忠于上下文、当前问题、工具返回的信息。"""
         
-        tool_call_count = 0
-        collected_tool_results = []
+        return full_user_prompt
+
+    def _parse_tool_call(self, ai_response: str) -> tuple[str, dict, str]:
+        """解析AI响应中的工具调用
         
-        while tool_call_count < self.valves.MAX_TOOL_CALLS:
-            # 获取AI响应
-            ai_response = self._call_openai_api(system_prompt, full_user_prompt)
+        Returns:
+            tuple: (tool_name, tool_args, error_message)
+            如果解析成功，error_message为None
+            如果解析失败，tool_name和tool_args为None，返回错误信息
+        """
+        if not ai_response.startswith("TOOL_CALL:"):
+            return None, None, None
+        
+        try:
+            # 解析工具调用
+            tool_call_str = ai_response.replace("TOOL_CALL:", "", 1)
             
-            # 检查是否需要调用工具
-            if ai_response.startswith("TOOL_CALL:search_chemical:"):
-                tool_call_count += 1
-                
-                # 显示工具调用信息
-                if stream_mode:
-                    for chunk in self._emit_processing(f"🔧 正在调用化学搜索工具（第{tool_call_count}次）...", "tool_calling"):
-                        yield f'data: {json.dumps(chunk)}\n\n'
-                else:
-                    yield f"🔧 正在调用化学搜索工具（第{tool_call_count}次）...\n"
-                
-                # 解析工具调用参数
-                tool_args_str = ai_response.replace("TOOL_CALL:search_chemical:", "")
-                try:
-                    tool_args = json.loads(tool_args_str)
-                    
-                    # 显示工具调用参数
-                    tool_info = f"📝 工具调用参数: {json.dumps(tool_args, ensure_ascii=False)}"
-                    if stream_mode:
-                        for chunk in self._emit_processing(tool_info, "tool_calling"):
-                            yield f'data: {json.dumps(chunk)}\n\n'
-                    else:
-                        yield tool_info + "\n"
-                    
-                    # 调用MCP工具
-                    tool_result = await self._search_chemical(
-                        query=tool_args.get("query", ""),
-                        search_type=tool_args.get("search_type", "formula"),
-                        use_fallback=tool_args.get("use_fallback", False)
-                    )
-                    
-                    # 显示工具调用结果
-                    result_info = f"✅ 工具调用结果:\n{tool_result[:500]}{'...' if len(tool_result) > 500 else ''}"
-                    if stream_mode:
-                        for chunk in self._emit_processing(result_info, "tool_calling"):
-                            yield f'data: {json.dumps(chunk)}\n\n'
-                    else:
-                        yield result_info + "\n"
-                    
-                    # 收集工具结果
-                    collected_tool_results.append({
-                        "call": tool_args,
-                        "result": tool_result
-                    })
-                    
-                    # 更新对话上下文，包含工具结果
-                    tool_context = f"[化学搜索结果 {tool_call_count}]\n查询: {tool_args}\n结果: {tool_result}\n\n"
-                    full_user_prompt = f"{full_user_prompt}\n\n{tool_context}基于以上搜索结果，请继续回答用户的问题。如果需要更多信息，可以继续调用工具。"
-                    
-                    # 继续下一轮，看是否需要更多工具调用
-                    continue
-                    
-                except json.JSONDecodeError:
-                    error_msg = "工具调用格式错误，无法解析参数"
-                    if stream_mode:
-                        for chunk in self._emit_processing(f"❌ {error_msg}", "tool_calling"):
-                            yield f'data: {json.dumps(chunk)}\n\n'
-                    else:
-                        yield f"❌ {error_msg}\n"
-                    break
+            # 找到第一个冒号分隔工具名称和参数
+            if ":" in tool_call_str:
+                tool_name, tool_args_str = tool_call_str.split(":", 1)
+                tool_name = tool_name.strip()
+                tool_args = json.loads(tool_args_str)
             else:
-                # 不需要工具调用，生成最终回答
-                break
+                raise ValueError("无效的工具调用格式")
+            
+            # 验证工具是否存在
+            if tool_name not in self.mcp_tools:
+                raise ValueError(f"工具 '{tool_name}' 不存在")
+            
+            return tool_name, tool_args, None
+            
+        except (json.JSONDecodeError, ValueError) as e:
+            return None, None, str(e)
+
+    async def _execute_tool_call_with_feedback(self, tool_name: str, tool_args: dict, stream_mode: bool) -> AsyncGenerator[str, None]:
+        """执行工具调用并提供进度反馈"""
+        # 显示工具调用信息
+        call_info = f"🔧 正在调用MCP工具 '{tool_name}'..."
+        if stream_mode:
+            for chunk in self._emit_processing(call_info, "tool_calling"):
+                yield f'data: {json.dumps(chunk)}\n\n'
+        else:
+            yield call_info + "\n"
         
-        # 生成最终回答
-        if collected_tool_results:
+        # 显示工具调用参数
+        tool_info = f"📝 工具调用参数: {json.dumps(tool_args, ensure_ascii=False)}"
+        if stream_mode:
+            for chunk in self._emit_processing(tool_info, "tool_calling"):
+                yield f'data: {json.dumps(chunk)}\n\n'
+        else:
+            yield tool_info + "\n"
+        
+        # 调用MCP工具
+        tool_result = await self._execute_mcp_tool(tool_name, tool_args)
+        
+        try:
+            json_tool_result = json.loads(tool_result)
+            tool_result = json.dumps(json_tool_result, indent=4)
+        except json.JSONDecodeError:
+            pass
+        
+        # 显示工具调用结果
+        result_info = f"✅ 工具调用结果:\n```json\n{tool_result}\n```"
+        if stream_mode:
+            for chunk in self._emit_processing(result_info, "tool_calling"):
+                yield f'data: {json.dumps(chunk)}\n\n'
+        else:
+            yield result_info + "\n"
+        
+        # 最后返回工具结果（作为特殊标记的字符串）
+        yield f"TOOL_RESULT:{tool_result}"
+
+    async def _generate_final_answer(self, user_message: str, tool_result: str, tool_name: str, tool_args: dict, full_user_prompt: str, system_prompt: str, stream_mode: bool) -> AsyncGenerator[str, None]:
+        """生成最终回答"""
+        if tool_result is not None:
             # 如果有工具调用结果，基于结果生成回答
-            final_system_prompt = "你是专业的化学信息专家，请基于提供的化学搜索结果，为用户提供准确、详细的回答。"
+            final_system_prompt = "你是专业的化学信息专家，请基于提供的MCP工具调用结果，为用户提供准确、详细的回答。"
             
-            tool_summary = "基于以下化学搜索结果:\n\n"
-            for i, result in enumerate(collected_tool_results, 1):
-                tool_summary += f"搜索{i}: {json.dumps(result['call'], ensure_ascii=False)}\n"
-                tool_summary += f"结果{i}: {result['result']}\n\n"
-            
-            final_user_prompt = f"{tool_summary}用户问题: {user_message}\n\n请基于以上搜索结果为用户提供准确详细的回答。"
+            tool_summary = f"""基于以下MCP工具调用结果:
+
+工具调用: {tool_name}
+参数: {json.dumps(tool_args, ensure_ascii=False)}
+结果: {tool_result}
+
+用户问题: {user_message}
+
+请基于以上工具调用结果为用户提供准确详细的回答。
+输出格式要求：
+1. 使用结构化的markdown格式组织信息
+2. 相关链接使用markdown链接格式：[链接文本](URL)
+3. 数值数据优先使用表格形式展示，便于比较和阅读
+4. 保持信息的完整性，不要省略重要细节"""
             
             if stream_mode:
                 # 流式模式开始生成回答的标识
                 answer_start_msg = {
                     'choices': [{
                         'delta': {
-                            'content': "\n**🧪 基于化学数据库信息回答**\n"
+                            'content': "\n**🧪 基于MCP工具调用结果回答**\n"
                         },
                         'finish_reason': None
                     }]
@@ -544,7 +836,7 @@ TOOL_CALL:search_chemical:{"query": "转换后的英文/分子式/SMILES", "sear
                 yield f"data: {json.dumps(answer_start_msg)}\n\n"
                 
                 # 流式生成最终回答
-                for chunk in self._stream_openai_response(final_user_prompt, final_system_prompt):
+                for chunk in self._stream_openai_response(tool_summary, final_system_prompt):
                     # 包装成SSE格式
                     chunk_data = {
                         'choices': [{
@@ -556,8 +848,8 @@ TOOL_CALL:search_chemical:{"query": "转换后的英文/分子式/SMILES", "sear
                     }
                     yield f"data: {json.dumps(chunk_data)}\n\n"
             else:
-                yield "🧪 **基于化学数据库信息回答**\n"
-                final_answer = self._call_openai_api(final_system_prompt, final_user_prompt)
+                yield "🧪 **基于MCP工具调用结果回答**\n"
+                final_answer = self._call_openai_api(final_system_prompt, tool_summary)
                 yield final_answer
         else:
             # 没有工具调用，直接返回AI响应
@@ -585,7 +877,92 @@ TOOL_CALL:search_chemical:{"query": "转换后的英文/分子式/SMILES", "sear
                     yield f"data: {json.dumps(chunk_data)}\n\n"
             else:
                 yield "💭 **回答**\n"
-                yield ai_response
+                final_answer = self._call_openai_api(system_prompt, full_user_prompt)
+                yield final_answer
+
+    async def _process_user_message(self, user_message: str, messages: List[dict], stream_mode: bool) -> AsyncGenerator[str, None]:
+        """处理用户消息，支持多轮MCP工具调用（重构后的简化版本）"""
+        
+        # 确保工具已加载且未过期
+        try:
+            async for tools_output in self._ensure_tools_loaded(stream_mode):
+                yield tools_output
+        except Exception as e:
+            error_msg = f"❌ MCP工具加载失败: {str(e)}"
+            if stream_mode:
+                for chunk in self._emit_processing(error_msg, "mcp_discovery"):
+                    yield f'data: {json.dumps(chunk)}\n\n'
+            else:
+                yield error_msg + "\n"
+            return
+        
+        # 获取系统提示词和构建上下文
+        system_prompt = self._get_system_prompt()
+        full_user_prompt = self._build_conversation_context(user_message, messages)
+        
+        # 显示AI决策进度
+        decision_msg = "🤔 正在分析用户问题，决定是否需要调用工具..."
+        if stream_mode:
+            for chunk in self._emit_processing(decision_msg, "tool_calling"):
+                yield f'data: {json.dumps(chunk)}\n\n'
+        else:
+            yield decision_msg + "\n"
+        
+        # 尝试解析工具调用，如果失败则重试
+        tool_name, tool_args = None, None
+        
+        for retry_count in range(self.valves.MAX_TOOL_CALLS):
+            ai_response = self._call_openai_api(system_prompt, full_user_prompt)
+            tool_name, tool_args, parse_error = self._parse_tool_call(ai_response)
+            
+            if parse_error is None:
+                # 解析成功或无需工具调用
+                if tool_name is None:
+                    # 不需要工具调用
+                    no_tool_msg = "💭 AI决定无需调用工具，正在生成回答..."
+                    if stream_mode:
+                        for chunk in self._emit_processing(no_tool_msg, "answer_generation"):
+                            yield f'data: {json.dumps(chunk)}\n\n'
+                    else:
+                        yield no_tool_msg + "\n"
+                break
+            else:
+                # 解析失败，重试
+                if retry_count < self.valves.MAX_TOOL_CALLS - 1:
+                    retry_msg = f"⚠️ 工具调用格式错误({parse_error})，正在重试({retry_count + 1}/{self.valves.MAX_TOOL_CALLS})..."
+                    if stream_mode:
+                        for chunk in self._emit_processing(retry_msg, "tool_calling"):
+                            yield f'data: {json.dumps(chunk)}\n\n'
+                    else:
+                        yield retry_msg + "\n"
+                    continue
+                else:
+                    # 达到最大重试次数
+                    error_msg = f"❌ 工具调用解析失败，已重试{self.valves.MAX_TOOL_CALLS}次: {parse_error}"
+                    if stream_mode:
+                        for chunk in self._emit_processing(error_msg, "tool_calling"):
+                            yield f'data: {json.dumps(chunk)}\n\n'
+                    else:
+                        yield error_msg + "\n"
+                    return
+        
+        # 执行工具调用（如果需要）
+        tool_result = None
+        if tool_name and tool_args:
+            async for output in self._execute_tool_call_with_feedback(tool_name, tool_args, stream_mode):
+                if isinstance(output, str) and output.startswith('TOOL_RESULT:'):
+                    # 这是最终的工具结果
+                    tool_result = output.replace('TOOL_RESULT:', '', 1)
+                else:
+                    # 这是进度反馈
+                    yield output
+        
+        # 生成最终回答
+        async for output in self._generate_final_answer(
+            user_message, tool_result, tool_name, tool_args, 
+            full_user_prompt, system_prompt, stream_mode
+        ):
+            yield output
 
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Union[str, Generator, Iterator]:
         """主管道函数"""
@@ -593,9 +970,10 @@ TOOL_CALL:search_chemical:{"query": "转换后的英文/分子式/SMILES", "sear
         self._reset_token_stats()
 
         if self.valves.DEBUG_MODE:
-            print(f"🧪 化学助手收到消息: {user_message}")
+            print(f"🧪 MCP化学助手V2收到消息: {user_message}")
             print(f"🔧 模型ID: {model_id}")
             print(f"📜 历史消息数量: {len(messages) if messages else 0}")
+            print(f"🔗 MCP服务器: {self.valves.MCP_SERVER_URL}")
 
         # 验证输入
         if not user_message or not user_message.strip():
@@ -603,31 +981,30 @@ TOOL_CALL:search_chemical:{"query": "转换后的英文/分子式/SMILES", "sear
             return
 
         # 检查是否是流式模式  
-        stream_mode = body.get("stream", False) and self.valves.ENABLE_STREAMING
+        stream_mode = self.valves.ENABLE_STREAMING
         
         try:
-            # 化学分析阶段
+            # MCP服务发现阶段
             if stream_mode:
-                for chunk in self._emit_processing("🧪 正在分析化学问题...", "chemical_analysis"):
+                for chunk in self._emit_processing("🔍 正在准备MCP服务...", "mcp_discovery"):
                     yield f'data: {json.dumps(chunk)}\n\n'
             else:
-                yield "🧪 **阶段1**: 正在分析化学问题...\n"
+                yield "🔍 **阶段1**: 正在准备MCP服务...\n"
             
-            # 在同步环境中运行异步代码
+            # 在同步环境中运行异步代码 - 真正的流式处理
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                # 处理用户消息，可能包含多次工具调用
-                async def run_process():
-                    results = []
-                    async for result in self._process_user_message(user_message, messages, stream_mode):
-                        results.append(result)
-                    return results
+                # 创建异步生成器
+                async_gen = self._process_user_message(user_message, messages, stream_mode)
                 
-                # 获取所有结果并逐个yield
-                results = loop.run_until_complete(run_process())
-                for result in results:
-                    yield result
+                # 流式处理每个结果
+                while True:
+                    try:
+                        result = loop.run_until_complete(async_gen.__anext__())
+                        yield result
+                    except StopAsyncIteration:
+                        break
                 
                 # 最后发送完成信息
                 if stream_mode:

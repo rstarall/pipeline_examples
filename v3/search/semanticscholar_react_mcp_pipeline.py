@@ -622,6 +622,10 @@ class Pipeline:
 对话历史: {context}
 已使用查询词: {used_queries}
 
+**用户问题分析：**
+- 根据对话历史和分析理解用户的问题和需求
+- 根据用户的问题和需求，选择合适的搜索策略
+
 **重要说明：**
 - 本系统使用的是Semantic Scholar MCP工具，这是一个强大的学术搜索引擎
 - 支持复杂的学术查询，包括专业术语、作者名称、期刊名称等
@@ -799,6 +803,7 @@ class Pipeline:
             "citation_count": "引用数",
             "relevance_weight": 0.0-1.0,
             "key_findings": "关键发现或结论",
+            "download_url": "pdf下载链接(openAccessPdf字段里提取，如果有)",
             "urls": ["DOI链接", "开放访问PDF链接", "论文URL等"]
         }}
     ],
@@ -845,7 +850,9 @@ class Pipeline:
                     ):
                         self.react_state['papers_collected'].append(paper)
                         added_count += 1
-            
+
+            total_papers_count = len(self.react_state['papers_collected'])
+
             if stream_mode:
                 obs_content = f"观察分析：{observation_data.get('observation', '无')}"
                 
@@ -854,7 +861,7 @@ class Pipeline:
                 
                 if key_papers:
                     obs_content += f"\n发现 {len(key_papers)} 篇关键论文"
-                    obs_content += f"，按相关性选择({len(selected_papers)}篇)，实际新增({added_count}篇)已收录"
+                    obs_content += f"，按相关性选择({len(selected_papers)}篇)，总计已收录({total_papers_count}篇)"
                 
                 query_source = observation_data.get('query_source', 'current_papers')
                 source_desc = {
@@ -898,26 +905,47 @@ class Pipeline:
 收集到的论文信息:
 {papers_summary}
 
-**重要要求：**
-1. **充分利用所有收集到的论文信息** - 不要遗漏任何相关研究
-2. **详细引用论文** - 每个观点都要标注来源论文的标题、作者、年份
-3. **整合多篇研究** - 综合分析不同研究的发现，指出共识和分歧
-4. **提供具体数据** - 引用论文中的具体研究数据、结果、结论、引用数
-5. **结构化回答** - 按逻辑顺序组织内容，便于理解
-6. **完整性** - 确保回答涵盖用户问题的各个方面
-7. **学术权威性** - 优先引用高引用数的重要论文
+## 📝 学术分析要求
 
-请基于以上所有论文信息提供全面、详细、准确的回答。包含相关论文的完整引用信息（标题、作者、年份、期刊、引用数等）。
-如果有DOI、URL、开放访问PDF链接，请务必使用markdown格式输出可点击链接(不要遗漏有效链接)。"""
+### 🔍 深度分析
+1. **摘要精读**: 仔细分析每篇论文的研究问题、方法、发现和结论
+2. **方法评述**: 评估研究方法的优势与局限性
+3. **关键发现**: 提取重要数据、结果、创新突破点
+4. **学术价值**: 基于引用数、研究质量评估论文贡献
+5. **跨论文比较**: 对比不同研究的方法和结果，识别趋势和争议
 
-        system_prompt = """你是专业的学术论文分析专家。你的任务是：
-1. 仔细分析所有提供的论文信息
-2. 充分利用每一篇相关论文的内容
-3. 提供全面、详细、有深度的学术回答
-4. 确保每个观点都有论文支撑和引用
-5. 整合多个研究来源，提供综合性见解
-6. 优先引用高影响力（高引用数）的论文
-7. 在回答开头简要提及检索到的论文数量统计，体现研究的全面性"""
+### 📚 引用格式要求（必须严格遵循）
+**正文引用**: 使用 [论文标题](Semantic Scholar链接)
+**回答末尾**: 必须显示完整论文引用列表
+
+**固定输出格式示例**:
+
+## 分析内容
+论文 1: 论文标题
+    标题: 论文标题
+    作者: 作者姓名 et al.
+    发表年份: 年份
+    期刊/会议: 期刊或会议名称
+    被引用次数: 引用次数
+    摘要精读分析: 对论文摘要的深入分析，包括研究问题、方法、发现和结论的详细解读。
+    研究方法评述:
+    优势: 研究方法的优势和创新点描述。
+    局限性: 研究方法的局限性和不足分析。
+    关键发现提取: 论文中的重要发现、数据结果和创新突破点。
+    学术价值评估: 基于引用数、研究质量等因素的学术贡献评估。
+    跨论文比较: 与其他相关研究的对比分析，识别趋势和争议。
+    Semantic Scholar 链接: https://www.semanticscholar.org/paper/paper_id
+    DOI: https://doi.org/doi_number
+    下载链接: pdf下载链接 (如有)
+
+## 论文引用
+1. **论文标题**
+   引用: 作者姓名 et al. (年份). 论文标题. 期刊/会议名称, 卷号(期号), 页码.
+
+**重要**: 必须使用此格式，确保引用输出稳定一致。
+"""
+
+        system_prompt = """你是专业的学术论文分析专家。请基于提供的论文信息提供深度学术分析，确保每个观点都有论文支撑和引用，严格遵循指定的引用格式。"""
 
         if stream_mode:
             for chunk in self._stream_openai_response(final_prompt, system_prompt):

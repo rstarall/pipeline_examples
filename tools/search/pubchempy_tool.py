@@ -1,9 +1,9 @@
 """
-title: Semantic Scholar Academic Paper Search Tool
-author: Assistant
+title: PubChemPy Chemical Search Tool
+author: Assistant  
 version: 1.0
 license: MIT
-description: A tool for searching academic papers using Semantic Scholar MCP service
+description: A tool for searching chemical information using PubChemPy MCP service
 """
 
 import asyncio
@@ -50,20 +50,12 @@ class Tools:
         
     class Valves(BaseModel):
         MCP_SERVER_URL: str = Field(
-            default="http://localhost:8992",
-            description="Semantic Scholar MCP服务器地址/MCP server URL for Semantic Scholar service",
+            default="http://localhost:8989",
+            description="PubChemPy MCP服务器地址/MCP server URL for PubChemPy service",
         )
         MCP_TIMEOUT: int = Field(
             default=30,
             description="MCP服务连接超时时间（秒）/MCP service connection timeout in seconds",
-        )
-        DEFAULT_LIMIT: int = Field(
-            default=10,
-            description="默认搜索论文数量/Default number of papers to search",
-        )
-        MAX_LIMIT: int = Field(
-            default=50,
-            description="最大搜索论文数量限制/Maximum limit for paper search",
         )
 
     async def _initialize_mcp_session(self) -> bool:
@@ -87,7 +79,7 @@ class Tools:
                         "roots": {"listChanged": True}
                     },
                     "clientInfo": {
-                        "name": "Semantic Scholar Tool",
+                        "name": "PubChemPy Tool",
                         "version": "1.0.0"
                     }
                 },
@@ -264,68 +256,66 @@ class Tools:
         except Exception as e:
             return {"error": f"MCP工具调用失败: {str(e)}"}
 
-    async def search_academic_papers(
+    async def search_chemical(
         self,
-        query: str = Field(..., description="The search query for academic papers using English "),
-        limit: Optional[int] = None,
-        offset: int = 0,
+        query: str = Field(..., description="Chemical search query - compound name in English, molecular formula (e.g., 'H2O', 'C6H12O6'), or SMILES string (e.g., 'CCO', 'c1ccccc1').MUST BE IN ENGLISH ONLY. If you have a Chinese compound name, please convert it to the English professional academic name first."),
+        search_type: str = "name",
         __event_emitter__: EmitterType = None
     ) -> str:
         """
-        Search academic papers using Semantic Scholar database. This tool searches for scholarly articles, 
-        research papers, and academic publications based on the provided query terms.
+        Search chemical compounds using PubChemPy database. This tool searches for chemical information 
+        including compound properties, molecular structures, and related data.
         
         Use this tool when users ask about:
-        - Scientific research papers
-        - Academic literature search
-        - Scholar articles on specific topics
-        - Research publications by authors
-        - Citations and academic references
-        - Peer-reviewed papers
-        - Conference papers and journal articles
+        - Chemical compound information and properties
+        - Molecular formulas and structures  
+        - Chemical names and synonyms
+        - SMILES strings and InChI data
+        - Drug information and pharmaceutical data
+        - Chemical identifiers (CID, CAS, etc.)
         
-        The tool supports complex academic queries including author names, technical terms, 
-        research topics, and specific methodologies.
+        The tool supports multiple search types:
+        - name: Search by compound name (English professional academic name)
+        - formula: Search by molecular formula (e.g., C8H10N4O2)
+        - smiles: Search by SMILES string (e.g., CCO for ethanol)
 
-        :param query: The search query for academic papers using English (e.g., "machine learning", "author:John Smith", "deep learning medical imaging")
-        :param limit: Maximum number of papers to return (default: configured default, max: configured max)  
-        :param offset: Number of papers to skip for pagination (default: 0)
+        :param query: Chemical search query - English compound name, molecular formula, or SMILES string (convert Chinese names to English first)
+        :param search_type: Type of search - 'name' for compound name search, 'formula' for molecular formula search, 'smiles' for SMILES structure search (default: 'name')
         :param __event_emitter__: Optional event emitter for status updates
-        :return: JSON formatted search results containing paper details
+        :return: JSON formatted search results containing chemical compound details
         """
         emitter = EventEmitter(__event_emitter__)
         
         # 验证参数
         if not query or not query.strip():
-            await emitter.update_status("搜索查询不能为空", True, "search_papers")
+            await emitter.update_status("搜索查询不能为空", True, "search_chemical")
             return json.dumps({"error": "搜索查询不能为空", "success": False}, ensure_ascii=False, indent=2)
         
-        # 设置默认值和限制
-        if limit is None:
-            limit = self.valves.DEFAULT_LIMIT
-        limit = min(limit, self.valves.MAX_LIMIT)
-        offset = max(0, offset)
+        # 验证搜索类型
+        valid_search_types = ["name", "formula", "smiles"]
+        if search_type not in valid_search_types:
+            await emitter.update_status(f"无效的搜索类型，支持的类型: {', '.join(valid_search_types)}", True, "search_chemical")
+            return json.dumps({"error": f"无效的搜索类型，支持的类型: {', '.join(valid_search_types)}", "success": False}, ensure_ascii=False, indent=2)
         
         await emitter.update_status(
-            f"正在搜索学术论文: {query} (限制: {limit}篇, 偏移: {offset})",
+            f"正在搜索化学化合物: {query} (搜索类型: {search_type})",
             False,
-            "search_papers"
+            "search_chemical"
         )
         
         try:
             # 调用MCP工具执行搜索
             tool_args = {
                 "query": query.strip(),
-                "limit": limit,
-                "offset": offset
+                "search_type": search_type
             }
             
-            result = await self._call_mcp_tool("search_papers", tool_args)
+            result = await self._call_mcp_tool("search_chemical", tool_args)
             
             # 检查MCP调用是否成功
             if "error" in result and result["error"]:
                 error_msg = f"MCP调用失败: {result['error']}"
-                await emitter.update_status(error_msg, True, "search_papers")
+                await emitter.update_status(error_msg, True, "search_chemical")
                 return json.dumps({"error": result["error"], "success": False}, ensure_ascii=False, indent=2)
             
             # 检查搜索是否成功
@@ -333,11 +323,11 @@ class Tools:
                 # 获取具体的错误信息
                 server_error = result.get("error")
                 if server_error:
-                    error_msg = f"学术论文搜索失败: {server_error}"
+                    error_msg = f"化学搜索失败: {server_error}"
                 else:
-                    error_msg = f"学术论文搜索失败: 未找到匹配的论文 (查询: {query}, 限制: {limit}篇)"
+                    error_msg = f"化学搜索失败: 未找到匹配的化合物 (查询: {query}, 搜索类型: {search_type})"
                 
-                await emitter.update_status(error_msg, True, "search_papers")
+                await emitter.update_status(error_msg, True, "search_chemical")
                 
                 # 添加调试信息
                 debug_info = {
@@ -345,176 +335,51 @@ class Tools:
                     "success": False,
                     "debug_info": {
                         "query": query,
-                        "limit": limit,
-                        "offset": offset,
+                        "search_type": search_type,
                         "mcp_response": result
                     }
                 }
                 return json.dumps(debug_info, ensure_ascii=False, indent=2)
             
             # 处理搜索结果
-            papers = result.get("results", [])
-            total_count = result.get("total_count", len(papers))
+            compounds = result.get("results", [])
+            total_count = result.get("total_count", len(compounds))
             
-            # 为每篇找到的论文发送详细的引用信息
-            for i, paper in enumerate(papers, 1):
-                title = paper.get("title", f"Paper {i}")
-                paper_url = paper.get("url", "")
+            # 发送完整的MCP JSON返回作为引用信息
+            if compounds:
+                # 使用第一个化合物的名称作为标题
+                first_compound = compounds[0]
+                name = first_compound.get("iupac_name") or first_compound.get("molecular_formula") or "Chemical Search Results"
                 
-                # 构建详细的论文信息
-                citation_content = f"**{title}**\n\n"
+                # 构建完整的MCP JSON返回内容
+                citation_content = f"**PubChemPy MCP JSON返回**\n\n"
+                citation_content += "```json\n"
+                citation_content += json.dumps(result, ensure_ascii=False, indent=2)
+                citation_content += "\n```"
                 
-                # 作者信息
-                authors = paper.get("authors", [])
-                if authors:
-                    author_names = []
-                    for author in authors[:5]:  # 显示前5个作者
-                        author_name = author.get("name", "Unknown Author")
-                        author_id = author.get("authorId")
-                        if author_id:
-                            author_names.append(f"{author_name} (ID: {author_id})")
-                        else:
-                            author_names.append(author_name)
-                    
-                    if len(authors) > 5:
-                        author_names.append(f"... 等 {len(authors)} 位作者")
-                    
-                    citation_content += f"**Authors:** {', '.join(author_names)}\n\n"
+                # 使用第一个化合物的URL或默认URL
+                cid = first_compound.get("cid")
+                url = f"https://pubchem.ncbi.nlm.nih.gov/compound/{cid}" if cid else "https://pubchem.ncbi.nlm.nih.gov/"
                 
-                # 基本信息
-                if paper.get("year"):
-                    citation_content += f"**Year:** {paper.get('year')}\n\n"
-                if paper.get("venue"):
-                    citation_content += f"**Venue:** {paper.get('venue')}\n\n"
-                
-                # 引用统计
-                if paper.get("citationCount"):
-                    citation_content += f"**Citations:** {paper.get('citationCount')}\n\n"
-                if paper.get("referenceCount"):
-                    citation_content += f"**References:** {paper.get('referenceCount')}\n\n"
-                if paper.get("influentialCitationCount"):
-                    citation_content += f"**Influential Citations:** {paper.get('influentialCitationCount')}\n\n"
-                
-                # 开放获取和PDF信息
-                if paper.get("isOpenAccess"):
-                    citation_content += f"**Open Access:** Yes\n\n"
-                    
-                # PDF下载链接
-                open_access_pdf = paper.get("openAccessPdf")
-                if open_access_pdf and open_access_pdf.get("url"):
-                    pdf_url = open_access_pdf.get("url")
-                    pdf_status = open_access_pdf.get("status", "unknown")
-                    pdf_license = open_access_pdf.get("license", "unknown")
-                    citation_content += f"**PDF Download:** [Download PDF]({pdf_url})\n\n"
-                    citation_content += f"**PDF Status:** {pdf_status}\n\n"
-                    if pdf_license != "unknown":
-                        citation_content += f"**License:** {pdf_license}\n\n"
-                
-                # DOI和外部标识
-                external_ids = paper.get("externalIds")
-                if external_ids:
-                    if external_ids.get("DOI"):
-                        doi = external_ids.get("DOI")
-                        citation_content += f"**DOI:** [{doi}](https://doi.org/{doi})\n\n"
-                    if external_ids.get("CorpusId"):
-                        citation_content += f"**Corpus ID:** {external_ids.get('CorpusId')}\n\n"
-                
-                # 研究领域
-                fields_of_study = paper.get("fieldsOfStudy", [])
-                if fields_of_study:
-                    citation_content += f"**Fields of Study:** {', '.join(fields_of_study)}\n\n"
-                
-                # 期刊信息
-                journal = paper.get("journal")
-                if journal:
-                    journal_name = journal.get("name")
-                    if journal_name:
-                        citation_content += f"**Journal:** {journal_name}\n\n"
-                    if journal.get("volume"):
-                        citation_content += f"**Volume:** {journal.get('volume')}\n\n"
-                    if journal.get("pages"):
-                        citation_content += f"**Pages:** {journal.get('pages')}\n\n"
-                
-                # TLDR摘要
-                tldr = paper.get("tldr")
-                if tldr and tldr.get("text"):
-                    citation_content += f"**TL;DR:** {tldr.get('text')}\n\n"
-                
-                # 摘要
-                abstract = paper.get("abstract")
-                if abstract and abstract != "No abstract available":
-                    # 限制摘要长度
-                    if len(abstract) > 800:
-                        abstract = abstract[:800] + "..."
-                    citation_content += f"**Abstract:** {abstract}\n\n"
-                
-                # Paper ID
-                if paper.get("paperId"):
-                    citation_content += f"**Paper ID:** {paper.get('paperId')}\n\n"
-                
-                # Semantic Scholar URL
-                if paper_url:
-                    citation_content += f"**Semantic Scholar:** [View Paper]({paper_url})\n\n"
-                
-                await emitter.send_citation(title, paper_url or "https://www.semanticscholar.org/", citation_content)
+                await emitter.send_citation(name, url, citation_content)
             
-            success_msg = f"搜索完成! 找到 {len(papers)} 篇论文 (总共 {total_count} 篇相关论文)"
-            await emitter.update_status(success_msg, True, "search_papers")
+            success_msg = f"搜索完成! 找到 {len(compounds)} 个化合物"
+            await emitter.update_status(success_msg, True, "search_chemical")
             
-            prompt = """## 📝 学术分析要求
-
-### 🔍 深度分析
-1. **摘要精读**: 仔细分析每篇论文的研究问题、方法、发现和结论
-2. **方法评述**: 评估研究方法的优势与局限性
-3. **关键发现**: 提取重要数据、结果、创新突破点
-4. **学术价值**: 基于引用数、研究质量评估论文贡献
-5. **跨论文比较**: 对比不同研究的方法和结果，识别趋势和争议
-
-### 📚 引用格式要求（必须严格遵循）
-**正文引用**: 使用 [论文标题](Semantic Scholar链接)
-**回答末尾**: 必须显示完整论文引用列表
-
-**固定输出格式示例**:
-
-## 分析内容
-论文 1: 论文标题
-    标题: 论文标题
-    作者: 作者姓名 et al.
-    发表年份: 年份
-    期刊/会议: 期刊或会议名称
-    被引用次数: 引用次数
-    摘要精读分析: 对论文摘要的深入分析，包括研究问题、方法、发现和结论的详细解读。
-    研究方法评述:
-    优势: 研究方法的优势和创新点描述。
-    局限性: 研究方法的局限性和不足分析。
-    关键发现提取: 论文中的重要发现、数据结果和创新突破点。
-    学术价值评估: 基于引用数、研究质量等因素的学术贡献评估。
-    Semantic Scholar 链接: https://www.semanticscholar.org/paper/paper_id
-    DOI: https://doi.org/doi_number
-    下载链接: pdf下载链接 (如有)
-## 综合分析
-1. 对所有论文进行综合分析，包括研究问题、方法、发现和结论的详细解读。
-## 论文引用
-1. **论文标题**
-   引用: 作者姓名 et al. (年份). 论文标题. 期刊/会议名称, 卷号(期号), 页码.
-
-**重要**: 必须使用此格式，确保引用输出稳定一致。"""
             # 返回格式化的结果
             formatted_result = {
                 "success": True,
                 "query": query,
-                "limit": limit,
-                "offset": offset,
+                "search_type": search_type,
                 "total_count": total_count,
-                "returned_count": len(papers),
-                "source": result.get("source", "semantic_scholar"),
-                "results": papers,
-                "prompt": prompt,
+                "returned_count": len(compounds),
+                "source": result.get("source", "unknown"),
+                "results": compounds
             }
             
             return json.dumps(formatted_result, ensure_ascii=False, indent=2)
             
         except Exception as e:
             error_msg = f"搜索过程中发生错误: {str(e)}"
-            await emitter.update_status(error_msg, True, "search_papers")
+            await emitter.update_status(error_msg, True, "search_chemical")
             return json.dumps({"error": str(e), "success": False}, ensure_ascii=False, indent=2)
