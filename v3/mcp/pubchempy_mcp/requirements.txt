@@ -1,0 +1,8 @@
+pubchempy>=1.0.4
+fastmcp>=2.0.0
+httpx>=0.25.0
+pydantic>=2.4.0
+requests>=2.31.0
+rdkit-pypi>=2022.9.5
+pillow>=10.0.0
+matplotlib>=3.7.0 

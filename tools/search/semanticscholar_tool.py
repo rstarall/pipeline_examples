@@ -266,7 +266,7 @@ class Tools:
 
     async def search_academic_papers(
         self,
-        query: str = Field(..., description="The search query for academic papers using English "),
+        query: str = Field(..., description="The search query for academic papers using English，most using academic english "),
         limit: Optional[int] = None,
         offset: int = 0,
         __event_emitter__: EmitterType = None
@@ -287,7 +287,7 @@ class Tools:
         The tool supports complex academic queries including author names, technical terms, 
         research topics, and specific methodologies.
 
-        :param query: The search query for academic papers using English (e.g., "machine learning", "author:John Smith", "deep learning medical imaging")
+        :param query: The search query for academic papers using English,most using academic english
         :param limit: Maximum number of papers to return (default: configured default, max: configured max)  
         :param offset: Number of papers to skip for pagination (default: 0)
         :param __event_emitter__: Optional event emitter for status updates

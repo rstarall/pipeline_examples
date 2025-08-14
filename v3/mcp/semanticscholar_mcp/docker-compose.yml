@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  semanticscholar-fastmcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # APT mirror configuration (comment out to use default)
+        APT_MIRROR: ${APT_MIRROR:-http://mirrors.aliyun.com}
+        # PIP mirror configuration (comment out to use default)
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+        PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-pypi.tuna.tsinghua.edu.cn}
+    ports:
+      - "8992:8992"
+    environment:
+      - PYTHONPATH=/app
+      - PORT=8992
+      - PYTHONUNBUFFERED=1
+      # Mirror configuration for runtime (if needed)
+      - APT_MIRROR=${APT_MIRROR:-http://mirrors.aliyun.com}
+      - PIP_INDEX_URL=${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+      - PIP_TRUSTED_HOST=${PIP_TRUSTED_HOST:-pypi.tuna.tsinghua.edu.cn}
+    volumes:
+      - ./src:/app/src  # Hot reload: mount source code
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8992/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - semanticscholar-network
+
+networks:
+  semanticscholar-network:
+    driver: bridge
