@@ -44,13 +44,13 @@ USER mcp
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8992/api/health || exit 1
+    CMD curl -f http://localhost:8993/api/health || exit 1
 
 # Expose port
-EXPOSE 8992
+EXPOSE 8993
 
 # Set environment variables
-ENV PORT=8992
+ENV PORT=8993
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 

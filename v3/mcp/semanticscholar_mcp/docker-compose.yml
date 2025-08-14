@@ -12,10 +12,10 @@ services:
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
         PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-pypi.tuna.tsinghua.edu.cn}
     ports:
-      - "8992:8992"
+      - "8993:8993"
     environment:
       - PYTHONPATH=/app
-      - PORT=8992
+      - PORT=8993
       - PYTHONUNBUFFERED=1
       # Mirror configuration for runtime (if needed)
       - APT_MIRROR=${APT_MIRROR:-http://mirrors.aliyun.com}

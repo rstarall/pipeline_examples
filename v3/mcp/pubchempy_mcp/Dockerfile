@@ -42,7 +42,7 @@ USER mcpuser
 ENV PYTHONPATH=/app
 
 # Expose port for HTTP transport (optional)
-EXPOSE 8989
+EXPOSE 8988
 
 # Run the FastMCP server
 CMD ["python", "src/mcp_server.py"] 
