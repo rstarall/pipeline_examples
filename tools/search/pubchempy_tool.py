@@ -350,22 +350,32 @@ class Tools:
                 # 使用第一个化合物的名称作为标题
                 first_compound = compounds[0]
                 name = first_compound.get("iupac_name") or first_compound.get("molecular_formula") or "Chemical Search Results"
-                
+                cid = first_compound.get("cid")
                 # 构建完整的MCP JSON返回内容
                 citation_content = f"**PubChemPy MCP JSON返回**\n\n"
                 citation_content += "```json\n"
                 citation_content += json.dumps(result, ensure_ascii=False, indent=2)
                 citation_content += "\n```"
-                
+                citation_content += "\n"
+
+                if not first_compound.get("image_url"):
+                    first_compound["image_url"] =  f"https://pubchem.ncbi.nlm.nih.gov/image/imgsrv.fcgi?cid={cid}&t=l"
+                citation_content += "**图片地址**\n\n"
+                citation_content += f"![{cid}]({first_compound.get('image_url')})"
+                citation_content += "\n"
                 # 使用第一个化合物的URL或默认URL
-                cid = first_compound.get("cid")
+                
                 url = f"https://pubchem.ncbi.nlm.nih.gov/compound/{cid}" if cid else "https://pubchem.ncbi.nlm.nih.gov/"
                 
                 await emitter.send_citation(name, url, citation_content)
             
             success_msg = f"搜索完成! 找到 {len(compounds)} 个化合物"
             await emitter.update_status(success_msg, True, "search_chemical")
-            
+            prompt = """
+            如果返回的信息中图片链接(image_url)不为空，请显示相关的图片；
+            请务必使用markdown图片语法格式输出: ![图片链接](图片链接)
+            如果图片链接为空，请忽略。
+            """
             # 返回格式化的结果
             formatted_result = {
                 "success": True,
@@ -374,7 +384,8 @@ class Tools:
                 "total_count": total_count,
                 "returned_count": len(compounds),
                 "source": result.get("source", "unknown"),
-                "results": compounds
+                "results": compounds,
+                "prompt": prompt
             }
             
             return json.dumps(formatted_result, ensure_ascii=False, indent=2)
