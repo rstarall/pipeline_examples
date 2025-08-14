@@ -154,17 +154,18 @@ async def extract_compound_properties(compound) -> ChemicalInfo:
         
         smiles = getattr(compound, 'canonical_smiles', None) or getattr(compound, 'smiles', None)
         
-        # Generate molecular image if SMILES is available
+        # Generate molecular image
         image_base64 = None
         image_url = None
         image_hash = None
+        cid = getattr(compound, 'cid', None)
         
         if smiles and RDKIT_AVAILABLE:
+            # Use SMILES to generate image via RDKit
             try:
                 image_base64 = await generate_molecule_image(smiles)
                 if image_base64:
                     # Upload image to remote server
-                    cid = getattr(compound, 'cid', 'unknown')
                     filename = f"molecule_{cid}.png"
                     upload_result = await upload_image_to_server(image_base64, filename)
                     
@@ -176,6 +177,13 @@ async def extract_compound_properties(compound) -> ChemicalInfo:
                         logger.warning(f"Failed to upload molecular image for CID {cid}")
             except Exception as img_error:
                 logger.error(f"Error processing molecular image: {str(img_error)}")
+        elif cid:
+            # If no SMILES but have CID, use PubChem image service
+            try:
+                image_url = f"https://pubchem.ncbi.nlm.nih.gov/image/imgsrv.fcgi?cid={cid}&t=l"
+                logger.info(f"Using PubChem image service for CID {cid}")
+            except Exception as img_error:
+                logger.error(f"Error generating PubChem image URL for CID {cid}: {str(img_error)}")
         
         return ChemicalInfo(
             cid=getattr(compound, 'cid', None),
@@ -293,12 +301,13 @@ async def search_direct_api(query: str, search_type: str) -> List[ChemicalInfo]:
         synonyms = await get_synonyms_direct(cid, client)
         smiles = prop.get("CanonicalSMILES")
         
-        # Generate molecular image if SMILES is available
+        # Generate molecular image
         image_base64 = None
         image_url = None
         image_hash = None
         
         if smiles and RDKIT_AVAILABLE:
+            # Use SMILES to generate image via RDKit
             try:
                 image_base64 = await generate_molecule_image(smiles)
                 if image_base64:
@@ -314,6 +323,13 @@ async def search_direct_api(query: str, search_type: str) -> List[ChemicalInfo]:
                         logger.warning(f"Failed to upload molecular image for CID {cid}")
             except Exception as img_error:
                 logger.error(f"Error processing molecular image for CID {cid}: {str(img_error)}")
+        elif cid:
+            # If no SMILES but have CID, use PubChem image service
+            try:
+                image_url = f"https://pubchem.ncbi.nlm.nih.gov/image/imgsrv.fcgi?cid={cid}&t=l"
+                logger.info(f"Using PubChem image service for CID {cid}")
+            except Exception as img_error:
+                logger.error(f"Error generating PubChem image URL for CID {cid}: {str(img_error)}")
         
         results.append(ChemicalInfo(
             cid=cid,
