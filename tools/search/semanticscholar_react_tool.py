@@ -79,7 +79,7 @@ class Tools:
             description="OpenAI API基础URL/OpenAI API base URL",
         )
         OPENAI_MODEL: str = Field(
-            default="gpt-4o-mini",
+            default="google/gemini-2.5-flash",
             description="OpenAI模型名称/OpenAI model name",
         )
         OPENAI_TIMEOUT: int = Field(

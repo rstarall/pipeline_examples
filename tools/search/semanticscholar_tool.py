@@ -65,6 +65,10 @@ class Tools:
             default=50,
             description="最大搜索论文数量限制/Maximum limit for paper search",
         )
+        MIN_PAPERS: int = Field(
+            default=5,
+            description="最小检索论文数量约束，如果检索结果少于此数量将返回错误/Minimum number of papers required, returns error if fewer papers found",
+        )
 
     async def _initialize_mcp_session(self) -> bool:
         if self._session_initialized:
@@ -283,7 +287,9 @@ class Tools:
         - Citations and academic references
         - Peer-reviewed papers
         - Conference papers and journal articles
-        
+        - the topic of articles or papers,or there is any keywords(papers,articles,research,etc.) in the question
+
+
         The tool supports complex academic queries including author names, technical terms, 
         research topics, and specific methodologies.
 
@@ -303,11 +309,17 @@ class Tools:
         # 设置默认值和限制
         if limit is None:
             limit = self.valves.DEFAULT_LIMIT
+        
+        # 获取最小论文数量要求
+        min_papers = max(1, self.valves.MIN_PAPERS)
+        
+        # 确保 limit 不小于最小论文数量要求
+        limit = max(limit, min_papers)
         limit = min(limit, self.valves.MAX_LIMIT)
         offset = max(0, offset)
         
         await emitter.update_status(
-            f"正在搜索学术论文: {query} (限制: {limit}篇, 偏移: {offset})",
+            f"正在搜索学术论文: {query} (限制: {limit}篇, 偏移: {offset}, 最小要求: {min_papers}篇)",
             False,
             "search_papers"
         )
@@ -505,6 +517,7 @@ class Tools:
                 "query": query,
                 "limit": limit,
                 "offset": offset,
+                "min_papers": min_papers,
                 "total_count": total_count,
                 "returned_count": len(papers),
                 "source": result.get("source", "semantic_scholar"),
